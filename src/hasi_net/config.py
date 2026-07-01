@@ -13,7 +13,12 @@ from typing import Any, Dict
 # Resolve paths relative to the repo root (parent of src/).
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = REPO_ROOT / "data"
-RESULTS_DIR = REPO_ROOT / "results"
+# RESULTS_DIR defaults to <repo>/results but can be redirected (e.g. to a
+# mounted Google Drive path on Colab) via the HASI_RESULTS_DIR env var, so
+# experiment outputs survive Colab disconnects when the repo is cloned to the
+# ephemeral /content filesystem.
+import os as _os
+RESULTS_DIR = Path(_os.environ.get("HASI_RESULTS_DIR", REPO_ROOT / "results"))
 
 # --- Unified crime vocabulary (used by BOTH datasets) ------------------------
 # The two papers address four women-centric crimes chosen for cross-dataset

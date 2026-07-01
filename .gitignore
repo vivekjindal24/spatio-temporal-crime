@@ -7,14 +7,10 @@ __pycache__/
 # local agent config (not research)
 .claude/
 
-# data (regenerable from public APIs, large)
-data/*.csv
+# data: commit the public source files (NCRB CSVs, 2011 census, district
+# shapefile, Chicago community-areas GeoJSON) so Colab runs are reproducible.
+# Keep ignoring the regenerable Chicago Socrata parquet cache (re-fetched live).
 data/*.parquet
-data/*.geojson
-data/*.shp
-data/*.dbf
-data/*.shx
-data/*.prj
 
 # results (regenerable by the Colab runs; keep csv/json, drop heavy/regenerable)
 results/*.pt
