@@ -1,0 +1,11 @@
+# HASI-Net — core dependencies
+torch>=2.0          # MPS (Apple Silicon) and CUDA backends
+numpy>=1.23
+pandas>=1.5
+requests>=2.28
+matplotlib>=3.6
+pyarrow>=11.0       # parquet IO
+geopandas>=0.13     # district boundary adjacency + choropleth
+shapely>=2.0
+# Optional, for richer contiguity metrics:
+# libpysal>=4.7

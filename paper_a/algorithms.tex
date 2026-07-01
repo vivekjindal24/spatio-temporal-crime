@@ -1,0 +1,70 @@
+% Pseudocode for HASI-Net -- used in Paper A. Stable methodology content.
+% Numbers live in main.tex; these algorithmic descriptions are architecture-fixed.
+
+\begin{algorithm}[t]
+\caption{Heterogeneous adaptive graph fusion (one forward pass of the graph block)}
+\label{alg:graph}
+\begin{algorithmic}[1]
+\Require fixed priors $A_{\mathrm{geo}}, A_{\mathrm{socio}}\in\mathbb{R}_+^{N\times N}$;
+node embeddings $E\in\mathbb{R}^{N\times d}$; fusion logits $\alpha\in\mathbb{R}^{3}$
+\State $w\gets\mathrm{softmax}(\alpha)$                                \Comment{learnable channel weights}
+\State $A_{\mathrm{adapt}}\gets\mathrm{softmax}\!\big(\mathrm{ReLU}(E E^{\top})\big)$ \Comment{latent adjacency, row-normalised}
+\State $A\gets w_1 A_{\mathrm{geo}}+w_2 A_{\mathrm{socio}}+w_3 A_{\mathrm{adapt}}$
+\For{$\ell=1\dots L_g$}                                              \Comment{graph conv layers}
+  \State $H\gets\mathrm{Dropout}\!\big(\mathrm{GELU}(H W_\ell)\big)$ with $H\gets A H$
+  \State $H\gets\mathrm{LayerNorm}(H + H_{\mathrm{in}})$              \Comment{residual}
+\EndFor
+\State \Return $H$                                                    \Comment{$[B,T,N,h]$}
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[t]
+\caption{Multi-scale temporal block with series decomposition and gated fusion}
+\label{alg:temporal}
+\begin{algorithmic}[1]
+\Require $H\in\mathbb{R}^{B N\times T\times h}$; kernel $k$; gate scalar $g$
+\State $\mathrm{trend},\ \mathrm{seasonal}\gets\mathrm{SeriesDecomp}(H,k)$ \Comment{moving-average split}
+\State $S\gets\mathrm{seasonal}$
+\For{$\ell=1\dots 2$}                                                \Comment{Informer encoder}
+  \State $S\gets S+\mathrm{Dropout}\big(\mathrm{ProbSparseAttn}(\mathrm{LN}(S))\big)$
+  \State $S\gets S+\mathrm{Dropout}\big(\mathrm{FFN}(\mathrm{LN}(S))\big)$
+\EndFor
+\State $\mathrm{local}\gets\mathrm{TCN}(\mathrm{seasonal})$            \Comment{dilated causal conv}
+\State $\sigma\gets\mathrm{sigmoid}(g)$
+\State \Return $\mathrm{trend}+\sigma\cdot S+(1-\sigma)\cdot\mathrm{local}$
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[t]
+\caption{Persistence-residual count-aware decoding}
+\label{alg:head}
+\begin{algorithmic}[1]
+\Require last-step hidden $z\in\mathbb{R}^{B\times N\times h}$; lookback $X\in\mathbb{R}^{B\times T_w\times N\times C}$; horizon $H$
+\State $\mathrm{carry}\gets\frac{1}{T_w}\sum_{t} X_t$                  \Comment{$[B,N,C]$ lookback mean}
+\State $\mathrm{carry}_{\mathrm{enc}}\gets\log(\mathrm{carry})$ (or $\log1p$)  \Comment{encode to model output space}
+\State $\Delta_\mu\gets z W_\mu + b_\mu$                              \Comment{small-init residual head}
+\State $\log\mu\gets\mathrm{carry}_{\mathrm{enc}}+\Delta_\mu$         \Comment{persistence + learned delta}
+\State $\log\alpha\gets z W_\alpha+b_\alpha$;\ \ $\pi_{\mathrm{logit}}\gets z W_\pi+b_\pi$
+\State \Return $\log\mu,\log\alpha,\pi_{\mathrm{logit}}$ replicated across $H$ steps
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[t]
+\caption{Adaptive-inertia multi-swarm PSO for hyperparameter selection}
+\label{alg:pso}
+\begin{algorithmic}[1]
+\Require search space $\Theta$ (hidden dim, graph layers, heads, dropout, lr);
+swarms $S$, particles $P$, iterations $I$; fitness $f$ = 15-epoch val MAE
+\State initialise $P\times S$ particles with random $\theta\in\Theta$ and velocity $v$
+\State $p_{\mathrm{best}}\gets\theta$;\ $g_{\mathrm{best}}\gets\arg\min f(\theta)$ per swarm
+\For{$t=1\dots I$}
+  \State $w\gets w_{\max}-(w_{\max}-w_{\min})\,t/I$                 \Comment{linear inertia decay}
+  \For{each particle}
+    \State $v\gets w v+c_1 r_1(p_{\mathrm{best}}-\theta)+c_2 r_2(g_{\mathrm{best}}-\theta)$
+    \State $\theta\gets\mathrm{clip}(\theta+v,\,\Theta)$;\ update $p_{\mathrm{best}}$
+  \EndFor
+  \State update $g_{\mathrm{best}}$ across all swarms                  \Comment{cross-swarm sharing}
+\EndFor
+\State \Return $g_{\mathrm{best}}$                                 \Comment{best hyperparameter setting}
+\end{algorithmic}
+\end{algorithm}

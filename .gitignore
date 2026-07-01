@@ -1,0 +1,37 @@
+# python
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# local agent config (not research)
+.claude/
+
+# data (regenerable from public APIs, large)
+data/*.csv
+data/*.parquet
+data/*.geojson
+data/*.shp
+data/*.dbf
+data/*.shx
+data/*.prj
+
+# results (regenerable by the Colab runs; keep csv/json, drop heavy/regenerable)
+results/*.pt
+results/*.log
+results/*.png
+
+# latex build artifacts (keep .tex, .pdf, figures)
+*.aux
+*.bbl
+*.blg
+*.out
+*.synctex.gz
+*.fdb_latexmk
+*.fls
+
+# logs (latex, run logs)
+*.log
+
+# os
+.DS_Store

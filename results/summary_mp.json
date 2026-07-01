@@ -1,0 +1,98 @@
+{
+  "dataset": "mp",
+  "tag": "mp",
+  "device": "mps",
+  "config": {
+    "target_region": "Madhya Pradesh",
+    "use_chicago_benchmark": false,
+    "mp_year_start": 2001,
+    "mp_year_end": 2014,
+    "chicago_year_start": 2010,
+    "chicago_year_end": 2023,
+    "socio_knn": 5,
+    "adaptive_graph": true,
+    "hidden_dim": 32,
+    "n_graph_layers": 1,
+    "n_attn_heads": 4,
+    "informer_factor": 5,
+    "tcn_channels": 32,
+    "tcn_kernel_size": 3,
+    "dropout": 0.3,
+    "fusion_alpha_init": 0.34,
+    "lookback": 4,
+    "horizon": 2,
+    "loss_type": "log1p_mse",
+    "focal_gamma": 1.5,
+    "epochs": 40,
+    "batch_size": 8,
+    "lr": 0.0005,
+    "weight_decay": 0.001,
+    "patience": 8,
+    "device": "mps",
+    "pso_enabled": false,
+    "pso_swarms": 3,
+    "pso_particles": 8,
+    "pso_iters": 6,
+    "pso_search_dim": 5,
+    "seed": 42
+  },
+  "metrics": {
+    "HASI-Net": {
+      "MAE": 22.821502685546875,
+      "RMSE": 47.14193344116211,
+      "RMSLE": 0.6669760942459106,
+      "WAPE": 37.07133102416992,
+      "R2": 0.6579542464341327,
+      "CSI": 0.41304347826086957
+    },
+    "HA": {
+      "MAE": 23.00057601928711,
+      "RMSE": 47.75510787963867,
+      "RMSLE": 0.6747900247573853,
+      "WAPE": 37.362213134765625,
+      "R2": 0.6489984220585463,
+      "CSI": 0.42696629213483145
+    },
+    "LSTM": {
+      "MAE": 23.174192428588867,
+      "RMSE": 47.74454879760742,
+      "RMSLE": 0.6574156880378723,
+      "WAPE": 37.64424133300781,
+      "R2": 0.6491535963555652,
+      "CSI": 0.4175824175824176
+    },
+    "STGCN": {
+      "MAE": 22.715797424316406,
+      "RMSE": 47.35228729248047,
+      "RMSLE": 0.6678211092948914,
+      "WAPE": 36.899620056152344,
+      "R2": 0.6548948901931343,
+      "CSI": 0.43333333333333335
+    },
+    "InformerOnly": {
+      "MAE": 26.07784652709961,
+      "RMSE": 51.35459899902344,
+      "RMSLE": 0.658390998840332,
+      "WAPE": 42.36094284057617,
+      "R2": 0.5940915230904329,
+      "CSI": 0.3229166666666667
+    }
+  },
+  "best_val_mae": 12.247662544250488,
+  "panel_meta": {
+    "region": "Madhya Pradesh",
+    "interpolated_share": 0.0,
+    "gap_years": [
+      2015,
+      2016
+    ],
+    "source": "NCRB Crime in India"
+  },
+  "n_nodes": 62,
+  "n_years": 14,
+  "channel_weights": [
+    0.33289259672164917,
+    0.3335542678833008,
+    0.3335532248020172
+  ]
+}

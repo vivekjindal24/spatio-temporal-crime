@@ -1,0 +1,94 @@
+{
+  "dataset": "chicago",
+  "tag": "chicago",
+  "device": "mps",
+  "config": {
+    "target_region": "Madhya Pradesh",
+    "use_chicago_benchmark": true,
+    "mp_year_start": 2001,
+    "mp_year_end": 2014,
+    "chicago_year_start": 2015,
+    "chicago_year_end": 2022,
+    "socio_knn": 5,
+    "adaptive_graph": true,
+    "hidden_dim": 90,
+    "n_graph_layers": 3,
+    "n_attn_heads": 6,
+    "informer_factor": 5,
+    "tcn_channels": 32,
+    "tcn_kernel_size": 3,
+    "dropout": 0.20721709728240967,
+    "fusion_alpha_init": 0.34,
+    "lookback": 12,
+    "horizon": 6,
+    "loss_type": "log1p_mse",
+    "focal_gamma": 1.5,
+    "epochs": 80,
+    "batch_size": 32,
+    "lr": 0.004999999888241291,
+    "weight_decay": 0.0001,
+    "patience": 15,
+    "device": "mps",
+    "pso_enabled": true,
+    "pso_swarms": 2,
+    "pso_particles": 5,
+    "pso_iters": 4,
+    "pso_search_dim": 5,
+    "seed": 42
+  },
+  "metrics": {
+    "HASI-Net": {
+      "MAE": 2.6442389488220215,
+      "RMSE": 5.737529754638672,
+      "RMSLE": 0.39371320605278015,
+      "WAPE": 21.855993270874023,
+      "R2": 0.9468764866956262,
+      "CSI": 0.7957158962795942
+    },
+    "HA": {
+      "MAE": 2.558826446533203,
+      "RMSE": 5.491496562957764,
+      "RMSLE": 0.3918268084526062,
+      "WAPE": 21.150014877319336,
+      "R2": 0.9513348173801234,
+      "CSI": 0.8064444934892959
+    },
+    "LSTM": {
+      "MAE": 2.7241435050964355,
+      "RMSE": 5.936722755432129,
+      "RMSLE": 0.39285293221473694,
+      "WAPE": 22.51644515991211,
+      "R2": 0.9431238234025484,
+      "CSI": 0.7797850445918134
+    },
+    "STGCN": {
+      "MAE": 2.6446921825408936,
+      "RMSE": 5.731281757354736,
+      "RMSLE": 0.39169472455978394,
+      "WAPE": 21.859739303588867,
+      "R2": 0.9469921185775061,
+      "CSI": 0.7946690761237859
+    },
+    "InformerOnly": {
+      "MAE": 3.311444044113159,
+      "RMSE": 8.303833961486816,
+      "RMSLE": 0.4075232446193695,
+      "WAPE": 27.370786666870117,
+      "R2": 0.8887258803586191,
+      "CSI": 0.6357175607519486
+    }
+  },
+  "best_val_mae": 2.7550878524780273,
+  "panel_meta": {
+    "region": "Chicago",
+    "aggregation": "community_area x month",
+    "source": "City of Chicago Data Portal (ijzp-q8t2)"
+  },
+  "n_nodes": 77,
+  "n_years": 96,
+  "channel_weights": [
+    0.331898957490921,
+    0.3431626856327057,
+    0.3249383866786957
+  ]
+}
