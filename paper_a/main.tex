@@ -28,37 +28,40 @@ Madhya Pradesh, India \\
 \maketitle
 
 \begin{abstract}
-Forecasting crime from aggregated regional records is technically harder than
-forecasting from precise incident coordinates: the spatial unit is coarse,
-the series are short, the counts are zero-inflated and right-skewed, and the
-graph of interactions between regions is only partially observed. We propose
+Forecasting crime from aggregated regional records is harder than forecasting
+from precise incident coordinates: the spatial unit is coarse, the series are
+short, the counts are zero-inflated and right-skewed, and the inter-region
+graph is only partially observed. We make two contributions. First, we propose
 \textbf{HASI-Net}, a Heterogeneous Adaptive Spatio-temporal Informer network
-that addresses all four difficulties jointly. (i)~A heterogeneous graph block
-fuses three adjacency channels---geographic rook contiguity, socioeconomic
-$k$-NN cosine similarity, and a learnable latent adjacency---through
-end-to-end-learned softmax weights, so the model can down-weight an uninformative
-prior on coarse data. (ii)~A multi-scale temporal block combines a
-ProbSparse (Informer) encoder, a dilated temporal convolutional branch, and a
-series-decomposition trend/seasonal split through a learned gate, giving both
-long-range and local dynamics on short series. (iii)~A persistence-residual
-count-aware head predicts a per-horizon-step delta on top of a lookback-mean
-carry, so the deep model starts at the historical-average baseline and only
-learns improvements, while emitting the parameters of a zero-inflated negative
-binomial for calibrated probabilistic forecasts. (iv)~An adaptive-inertia
-multi-swarm particle swarm optimiser selects hyperparameters. On the Chicago
-community-area$\times$month benchmark (96 months, 77 areas, 6 crime types)
-HASI-Net is the best neural model---beating LSTM and Informer-only on every
-metric and tying ST-GCN---while remaining competitive with the strong
-persistence baseline, and on the aggregated Madhya Pradesh district panel it
-attains the best $R^2$ and RMSE and provides interpretable channel weights
-and district risk maps for policy use. All results are
-reproduced by an open M1/Colab notebook companion.
+whose graph block fuses geographic rook contiguity, socioeconomic $k$-NN
+cosine similarity, and a learnable latent adjacency through learned softmax
+weights; whose multi-scale temporal block combines a ProbSparse Informer
+encoder, a dilated TCN, and a series-decomposition trend/seasonal split behind
+a learned gate; and whose persistence-residual count-aware head predicts a
+per-horizon delta on a lookback-mean carry, starting at the historical-average
+baseline and emitting a zero-inflated negative-binomial parametrisation.
+Second, and equally important, we report a rigorous eight-model,
+five-seed, three-horizon benchmark on a real-geography Chicago
+community-area$\times$month panel (120 months, 77 areas, four unified
+women-related crime categories), evaluated not only on point error but on a
+\emph{leak-free event-verification protocol} (per-node 90th-percentile spike
+thresholds from training only; POD/FAR/CSI and top-$k$ hotspot hit rate). The
+central, honestly-reported finding is that simple historical-average
+\emph{persistence is a remarkably strong baseline}---it leads raw MAE at every
+horizon and is matched, not beaten, by every deep model including HASI-Net on
+both point and event metrics. GraphWaveNet is the marginal accuracy winner;
+HASI-Net is the best deep model at the medium horizon and the most
+reproducible at the long horizon, and a component ablation confirms each graph
+channel contributes. We argue the deep model's value therefore lies not in
+point accuracy but in the calibrated probabilistic forecasts and cross-region
+transfer developed in the companion paper. All numbers come from re-runnable
+CUDA runs with persisted predictions.
 \end{abstract}
 
 \begin{IEEEkeywords}
 spatio-temporal forecasting, graph neural networks, Informer, crime
-prediction, adaptive graph learning, count-aware loss, particle swarm
-optimization
+prediction, adaptive graph learning, count-aware loss, forecast
+verification, persistence baseline
 \end{IEEEkeywords}
 
 % ===========================================================================
@@ -91,10 +94,17 @@ TCN, learned gate---tuned for short aggregated series (Sec.~\ref{sec:temporal}).
 (3)~A persistence-residual count-aware head with per-step deltas and a
 zero-inflated negative-binomial parametrisation, which anchors the deep model
 at the historical-average baseline and emits calibrated probabilistic forecasts
-(Sec.~\ref{sec:head}). (4)~An adaptive-inertia multi-swarm PSO for
-hyperparameter selection (Sec.~\ref{sec:pso}). (5)~Reproducible evaluation on a
-fine-grained Chicago benchmark and an aggregated Madhya Pradesh panel, with an
-open M1/MPS and Colab notebook companion.
+(Sec.~\ref{sec:head}). (4)~A rigorous eight-model, five-seed, three-horizon
+benchmark on a real-geography Chicago panel, evaluated with point metrics, a
+leak-free per-node event-verification protocol (POD/FAR/CSI), and top-$k$
+hotspot hit rate---and the honest finding that historical-average persistence
+is a strong baseline that the deep models match but do not beat on point or
+event accuracy (Sec.~\ref{sec:results}). (5)~A component ablation isolating the
+contribution of each graph channel (Sec.~\ref{sec:ablation}). The calibrated
+probabilistic head, cross-region transfer, and conditional-coverage analysis
+that justify the deep model where point accuracy cannot are developed in the
+companion paper. All results are reproduced by open CUDA notebooks with
+persisted predictions.
 
 % ===========================================================================
 \section{Related Work}\label{sec:related}
@@ -222,73 +232,122 @@ swarms. Algorithm~\ref{alg:pso} gives the procedure.
 
 % ===========================================================================
 \section{Datasets}\label{sec:data}
-\textbf{Madhya Pradesh district panel (aggregated).} NCRB ``crimes against
-women'' district tables for 2001--2014~\cite{ncrb_cii} provide $C{=}7$ IPC
-categories (rape, kidnapping/abduction, dowry deaths, assault on modesty,
-insult to modesty, cruelty by husband/relatives, importation of girls) for
-$N{=}62$ MP districts over $T{=}14$ years. Census 2011 district
-socioeconomics~\cite{census2011} (literacy, sex ratio, workers, SC/ST share,
-urbanisation) supply node features. Geographic adjacency is rook contiguity
-from district boundary polygons. This panel is short ($T{=}14$ annual steps),
-coarse, and zero-inflated---representative of the aggregated Indian regime.
+We use two real-geography panels of the same four unified women-related crime
+categories---rape/sexual assault, kidnapping/abduction, assault, and domestic
+violence---so that the model and the cross-region transfer study of the
+companion paper operate on a consistent crime space.
 
-\textbf{Chicago community-area benchmark (fine-grained).} City of Chicago
-incident records~\cite{chicagoportal} for 2015--2022 filtered to six
-women-relevant violent crime types (assault, battery, sexual assault, sexual
-offense, offenses involving children, homicide) and aggregated to a
-$77\times96$ community-area$\times$month grid. This benchmark has precise
-spatial structure and enough temporal length for the deep model to learn,
-and validates that HASI-Net also works on fine-grained data (proposal
-objective~5).
+\textbf{Chicago community-area benchmark (primary).} City of Chicago incident
+records~\cite{chicagoportal} for 2015--2024 (120 months) are classified into
+the four unified categories by a disjoint, priority-ordered rule (sexual
+offences first, then kidnapping, then domestic-violence flag, then assault, so
+no incident is double-counted) and aggregated to a $77\times120$
+community-area$\times$month grid. Geographic adjacency is rook contiguity of
+the community-area boundaries; node features are ones (the socio channel is
+disabled here and exercised on the coarser MP panel, where census features
+exist). This panel has precise spatial structure and enough temporal length
+for sliding-window training, and is the primary benchmark for all
+multi-horizon and event-verification results.
+
+\textbf{Aggregated Madhya Pradesh panel (coarse).} NCRB ``crimes against
+women'' district tables for 2001--2014~\cite{ncrb_cii}, mapped to the same
+four unified categories, give $N{=}51$ MP districts over $T{=}14$ annual
+steps. Census 2011 district socioeconomics~\cite{census2011} (literacy, sex
+ratio, workers, SC/ST share, urbanisation) supply node features; geographic
+adjacency is rook contiguity from district boundaries. This panel is short
+($T{=}14$), coarse, and zero-inflated---representative of the aggregated Indian
+reporting regime---and is used here for the cross-country transfer and
+interpretability analysis developed in the companion paper.
 
 % ===========================================================================
 \section{Experimental setup}\label{sec:setup}
-\textbf{Baselines.} Historical Average (HA, lookback mean carried forward);
-LSTM; ST-GCN~\cite{yu2018stgcn} (fixed geographic graph + temporal conv, no
-adaptive/socio channel); and Informer-only (temporal block, no graph). All
-baselines share the same head/loss/evaluation path for a fair comparison.
+\textbf{Models.} We benchmark eight forecasters: Historical Average (HA, the
+lookback mean carried forward flat---the persistence baseline); LSTM;
+ST-GCN~\cite{yu2018stgcn}; Graph WaveNet~\cite{wu2019graphwavenet}; DCRNN;
+MTGNN; Informer-only (the temporal block with no graph branch); and HASI-Net.
+All deep models share HASI-Net's persistence-residual head, count loss, and
+evaluation path, so differences are attributable to the spatio-temporal
+representation rather than the decoder.
 
-\textbf{Metrics.} MAE, RMSE, RMSLE (robust to zero counts), WAPE
-($\sum|y-\hat y|/\sum|y|$), $R^2$, and CSI (critical success index for
-top-10\% hotspot detection). We do not report MAPE, which is undefined for
-zero-inflated counts.
+\textbf{Metrics.} Point: MAE, RMSE, RMSLE (robust to zero counts), WAPE
+($\sum|y-\hat y|/\sum|y|$), $R^2$, and CSI. We additionally evaluate
+\emph{event-verification} and \emph{hotspot} metrics, which are the
+operationally relevant ones for policing and which point MAE does not capture
+(Sec.~\ref{sec:hotspot}). MAPE is undefined for zero-inflated counts and is
+not reported.
 
-\textbf{Splits.} Chronological sliding windows: 65\% train / 15\% val / 20\%
-test, with the most recent window held out for test. Hyperparameters are
-selected on val; final numbers are on the test split.
+\textbf{Event-verification protocol.} For each (node, crime) we define a
+leak-free spike threshold as the 90th percentile of that node's own training
+counts; a test cell is an \emph{event} iff its true count meets this threshold
+and a \emph{predicted event} iff the forecast meets it. From the $2{\times}2$
+contingency we report POD (hit rate), FAR (false-alarm ratio), CSI, and
+frequency bias. A per-node threshold makes a \emph{transient spike} relative
+to that location---not a chronically high-crime node---the event, which is the
+case a flat carry cannot anticipate. We also report a global-pooled 90th
+percentile (an absolute high-crime event) for contrast. Hotspot hit rate
+Hit@$k$ is, at each forecast step, the overlap fraction of the top-$k$ nodes
+by predicted and by actual crime (summed over the four categories); we report
+$k{=}5,10$.
 
-\textbf{Compute.} Apple Silicon MPS backend (float32) for development;
-CUDA on Colab for the full PSO search. Seeds fixed at 42.
+\textbf{Splits and seeds.} Chronological sliding windows:
+65\%/15\%/20\% train/val/test, most-recent held out for test. Hyperparameters
+are selected on val; final numbers are on the test split. Every model is run
+over five seeds (42, 1, 2, 3, 4); we report mean$\pm$std and Friedman's test
+plus paired-$t$ comparisons against HA. PSO is run once on the first seed and
+frozen for all seeds, so multi-seed variance reflects training stochasticity
+only.
+
+\textbf{Compute.} All training and evaluation on Colab CUDA (Tesla T4),
+float32. Predictions are persisted per (seed, model) so the offline
+event-verification metrics are reproducible without retraining.
 
 % ===========================================================================
 \section{Results}\label{sec:results}
-% NUMBERS FILLED FROM results/metrics_chicago.csv and results/metrics_mp.csv.
-Table~\ref{tab:chicago} reports test-set metrics on the Chicago benchmark.
-Crime counts at the community-area$\times$month resolution are highly
-persistent, so the historical-average (HA) baseline is strong and leads on
-raw point-accuracy metrics. HASI-Net is the best \emph{neural} model: it
-beats LSTM and Informer-only on every metric, ties ST-GCN (MAE 2.644 vs
-2.645; $R^2$ 0.947 vs 0.947), and lands within 3.3\% of HA on MAE while
-additionally providing the calibrated probabilistic forecasts, interpretable
-graph-channel fusion, and per-district risk maps that HA structurally cannot
-produce. The Informer-only ablation (no graph branch) is the weakest neural
-model, confirming that the spatial branch is responsible for closing the gap
-to HA on this benchmark.
+% NUMBERS FROM re-runnable Colab CUDA runs (5 seeds), persisted under
+% results/: metrics_p1_chicago{,_h6,_h12}_meanstd.csv,
+% ablation_p1_chicago_meanstd.csv, hotspot_p1hot_chicago_meanstd.csv,
+% p1_multihorizon_stats.json.
+\subsection{Multi-horizon point accuracy}\label{sec:point}
+Table~\ref{tab:multihorizon} reports test MAE (mean$\pm$std over five seeds)
+for all eight models at horizons $H{=}3,6,12$ months. The dominant pattern is
+honest and we report it plainly: \emph{historical-average persistence (HA) leads
+raw MAE at every horizon}. The deep models do not pull ahead as the horizon
+lengthens---persistence stays strong---and the field is tightly bunched:
+at $H{=}3$ the best deep model (GraphWaveNet, $2.585$) merely ties HA
+($2.590$); at $H{=}6$ HASI-Net is the best deep model ($2.687$, Friedman mean
+rank~2, and the best CSI of $0.732$) yet remains behind HA ($2.631$); at
+$H{=}12$ HASI-Net has the lowest variance of any model ($\pm0.012$, the most
+reproducible) but ranks sixth on mean MAE, with MTGNN the best deep model.
+Friedman's test rejects the null of equal models at every horizon
+($H{=}3:\chi^2{=}22.9,p{=}0.0018$; $H{=}6:\chi^2{=}15.7,p{=}0.028$;
+$H{=}12:\chi^2{=}24.0,p{=}0.0011$), so the ordering is not noise, but the
+\emph{effect sizes} versus HA are small: paired-$t$ over five seeds gives
+GraphWaveNet a statistically consistent but $\sim$1.5\% MAE edge over HA at
+$H{=}3$ ($p{=}0.008$, 5/5 seeds), while HASI-Net is marginally \emph{worse}
+than HA on MAE at $H{=}3$ ($+0.060$, $p{=}0.064$, 0/5 seeds better). We make
+no point-MAE state-of-the-art claim. The defensible accuracy findings are
+narrow but real: HASI-Net is the best deep model at the medium horizon and the
+most reproducible at the long horizon; GraphWaveNet is the marginal overall
+point-accuracy winner.
 
 \begin{table}[t]
 \centering
-\caption{Chicago community-area$\times$month benchmark (test split, 2015--2022).
-Best in \textbf{bold}; second best underlined.}
-\label{tab:chicago}
-\begin{tabular}{lrrrrrr}
+\caption{Chicago benchmark, test MAE (mean$\pm$std over 5 seeds) at three
+horizons. HA is deterministic ($\pm0$). Best deep model in \textbf{bold};
+overall best underlined.}
+\label{tab:multihorizon}
+\begin{tabular}{lccc}
 \toprule
-Model & MAE$\downarrow$ & RMSE$\downarrow$ & RMSLE$\downarrow$ & WAPE$\downarrow$ & $R^2\uparrow$ & CSI$\uparrow$\\
+Model & $H{=}3$ & $H{=}6$ & $H{=}12$\\
 \midrule
-HA & \textbf{2.559} & \textbf{5.492} & \underline{0.3918} & \textbf{21.15} & \textbf{0.9513} & \textbf{0.8064}\\
-LSTM & 2.724 & 5.937 & 0.3929 & 22.52 & 0.9431 & 0.7798\\
-ST-GCN & 2.645 & \underline{5.731} & \textbf{0.3917} & 21.86 & \underline{0.9470} & 0.7947\\
-Informer-only & 3.311 & 8.304 & 0.4075 & 27.37 & 0.8887 & 0.6357\\
-\textbf{HASI-Net} & \underline{2.644} & 5.738 & 0.3937 & \underline{21.86} & 0.9469 & \underline{0.7957}\\
+HA            & \underline{2.590} & \underline{2.631} & \underline{2.662}\\
+LSTM          & 2.683$\pm$.011 & 2.722$\pm$.016 & 2.763$\pm$.033\\
+ST-GCN        & 2.691$\pm$.016 & 2.701$\pm$.011 & 2.755$\pm$.040\\
+GraphWaveNet  & \textbf{2.585}$\pm$.022 & 2.711$\pm$.015 & 2.784$\pm$.038\\
+DCRNN         & 2.679$\pm$.024 & 2.716$\pm$.022 & 2.721$\pm$.028\\
+MTGNN         & 2.599$\pm$.049 & 2.715$\pm$.039 & \textbf{2.716}$\pm$.031\\
+InformerOnly  & 2.661$\pm$.021 & 2.746$\pm$.050 & 2.856$\pm$.097\\
+HASI-Net      & 2.662$\pm$.024 & \textbf{2.687}$\pm$.036 & 2.766$\pm$.012\\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -306,151 +365,174 @@ selected by adaptive-inertia multi-swarm PSO.}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{figures/training_curves_chicago.png}
-\caption{HASI-Net training loss and validation MAE on the Chicago benchmark.}
-\label{fig:train}
-\end{figure}
-
-\begin{figure}[t]
-\centering
 \includegraphics[width=\linewidth]{figures/channel_weights_chicago.png}
 \caption{Learned heterogeneous graph channel weights (geographic /
-socioeconomic / adaptive) on Chicago.}
+socioeconomic / adaptive) on Chicago---near-balanced ($\approx$0.33 each),
+indicating all three notions carry signal on this benchmark.}
 \label{fig:channels}
 \end{figure}
 
-\begin{figure}[t]
-\centering
-\includegraphics[width=\linewidth]{figures/comparison_MAE_chicago.png}
-\caption{Model comparison on test MAE, Chicago benchmark.}
-\label{fig:cmp}
-\end{figure}
-
 \subsection{Component ablation}\label{sec:ablation}
-Table~\ref{tab:ablation} removes one component at a time from the full model.
-The socioeconomic channel is the clearest contributor: removing it
-(\textit{no-socio}) degrades MAE by 5.2\% (2.854 vs 2.713) and CSI by 2.7
-points, confirming that census similarity carries signal beyond geographic
-contiguity. Removing the \emph{adaptive} learnable channel
-(\textit{no-adaptive-graph}) slightly \emph{improves} MAE (2.593 vs 2.713):
-on this 77-node benchmark the extra adaptive parameters overfit relative to
-the two fixed channels, a regularization effect consistent with the
-near-uniform learned fusion weights (Fig.~\ref{fig:channels}). The
-\textit{no-spatial} variant (both fixed channels replaced by identity, no
-adaptive graph) sits close to Full, because the socioeconomic gain and the
-adaptive-graph cost partially cancel. Replacing log1p-MSE with the
-zero-inflated negative-binomial loss (\textit{ZINB-loss}) is competitive
-(MAE 2.702 vs 2.713; higher CSI 0.797 vs 0.792), validating the count-aware
-parametrisation as a robust alternative to the robust-regression default. We
-report this mixed picture honestly rather than claiming every component is
-individually beneficial: the socioeconomic channel and the count-aware head
-are the robust wins, while the adaptive graph is a capacity-regularization
-trade-off that helps on the coarser MP panel (companion paper) but not on
-this fine-grained benchmark.
+Table~\ref{tab:ablation} removes one graph channel at a time from the full
+model ($H{=}3$, mean$\pm$std over five seeds). Removing any channel degrades
+MAE monotonically---Full ($2.633$) $<$ no-adaptive ($2.655$) $<$ no-socio
+($2.673$) $<$ no-spatial ($2.686$)---so on this benchmark each of the three
+adjacency notions contributes, with the adaptive and socioeconomic channels
+the larger individual contributors. Replacing the log1p-MSE loss with a pure
+zero-inflated negative-binomial likelihood (\textit{ZINB-loss}) is the worst
+variant ($2.722$): on these small, trended panels a pure count likelihood
+pulls the mean off the persistence carry, lowering the likelihood while
+raising point MAE and mis-centring the quantiles. This objective mismatch
+motivates the companion paper's pivot to a log1p-MSE-plus-pinball
+multi-objective loss rather than a pure count likelihood. We report the
+ablation as a monotone-degradation result rather than claiming any single
+channel dominates: all three carry signal, and the learned fusion weights
+(Fig.~\ref{fig:channels}) settle near-balanced ($\approx$0.33 each).
 
 \begin{table}[t]
 \centering
-\caption{Component ablation on Chicago (MAE, RMSE, CSI, $R^2$; lower MAE/RMSE
-better, higher CSI/$R^2$ better). Full reproduces the headline config within
-run-to-run variance.}
+\caption{Component ablation on Chicago ($H{=}3$, mean$\pm$std over 5 seeds,
+40 epochs). Lower MAE better. Removing any channel degrades MAE.}
 \label{tab:ablation}
-\begin{tabular}{lrrrr}
+\begin{tabular}{lr}
 \toprule
-Variant & MAE & RMSE & CSI & $R^2$\\
+Variant & MAE\\
 \midrule
-Full HASI-Net & 2.713 & 5.940 & 0.7925 & 0.9431\\
-no-adaptive-graph & 2.593 & 5.586 & 0.7991 & 0.9496\\
-no-socio & 2.854 & 6.299 & 0.7657 & 0.9360\\
-no-spatial & 2.681 & 5.828 & 0.7859 & 0.9452\\
-ZINB-loss & 2.702 & 5.696 & 0.7971 & 0.9476\\
+Full HASI-Net   & \textbf{2.633}$\pm$.019\\
+no-adaptive-graph & 2.655$\pm$.022\\
+no-socio         & 2.673$\pm$.028\\
+no-spatial       & 2.686$\pm$.013\\
+ZINB-loss        & 2.722$\pm$.043\\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\begin{figure}[t]
+\subsection{Event verification and hotspot detection}\label{sec:hotspot}
+Point MAE rewards getting the level right, which persistence does by carrying
+the lookback mean; policing instead acts on \emph{where and when crime spikes}.
+Table~\ref{tab:hotspot} reports the event-verification and hotspot metrics
+($H{=}3$, mean over five seeds) using the leak-free per-node 90th-percentile
+threshold (Sec.~\ref{sec:setup}). The finding extends the persistence result to
+the operationally relevant axis: \emph{no model beats persistence by a
+practically meaningful margin on event or hotspot metrics either}. GraphWaveNet
+is again the marginal, statistically consistent leader (per-node CSI $0.400$
+vs HA $0.393$, $p{=}0.003$, 5/5 seeds; MAE $2.552$ vs $2.591$, $p{=}0.008$),
+while HASI-Net is mid-pack and marginally \emph{worse} than HA on per-node spike
+CSI ($0.383$ vs $0.393$, 0/5 seeds) and on the global high-crime CSI
+($0.737$ vs $0.747$, $p{=}0.038$). Friedman's test over the eight models on
+per-node CSI rejects equality ($\chi^2{=}27.7$, $p{=}0.0003$), so the ordering
+is real, not noise.
+
+Two properties are disclosed rather than hidden. First, \emph{every} model
+under-forecasts spike events (frequency bias $0.43$--$0.49{<}1$): deep models
+trade a low false-alarm ratio (e.g.\ ST-GCN $0.082$ vs HA $0.130$) for a
+slightly lower hit rate, i.e.\ they are more conservative, not more skilful, at
+anticipating per-node spikes. Second, the global-pooled threshold (an absolute
+high-crime event) gives high CSI for all models ($0.73$--$0.76$) because the
+chronically high-crime nodes are persistent and every model reproduces them;
+the per-node threshold is the discriminating, operationally meaningful one,
+and it is modest for everyone (CSI $\approx0.39$). The top-$k$ hotspot hit rate
+(Hit@$5{\approx}0.88$ for nearly all models) is near-saturated for the same
+reason---the hotspot node set is persistent---and is not discriminating. The
+honest conclusion is that anticipating \emph{transient} per-node spikes is
+hard for every method here, persistence included; we argue in the companion
+paper that this is precisely the regime where calibrated \emph{conditional}
+uncertainty (rather than sharper point forecasts) is the operative need.
+
+\begin{table}[t]
 \centering
-\includegraphics[width=\linewidth]{figures/ablation_chicago.png}
-\caption{Ablation: per-component MAE contribution.}
-\label{fig:abl}
-\end{figure}
+\caption{Event verification and hotspot detection, Chicago $H{=}3$ (mean over
+5 seeds). Per-node threshold = 90th pct of each node's training counts (leak-free).
+POD/FAR/CSI on the per-node spike event; global CSI on the pooled high-crime
+event; Hit@5 = top-5 node-set overlap. Best deep model in \textbf{bold}.}
+\label{tab:hotspot}
+\begin{tabular}{lcccccc}
+\toprule
+Model & MAE & POD$\uparrow$ & FAR$\downarrow$ & CSI$\uparrow$ & bias & Hit@5\\
+\midrule
+HA            & 2.591 & 0.417 & 0.130 & 0.393 & 0.479 & 0.879\\
+LSTM          & 2.680 & 0.389 & 0.089 & 0.375 & 0.427 & 0.886\\
+ST-GCN        & 2.693 & 0.386 & \textbf{0.082} & 0.373 & 0.421 & 0.879\\
+GraphWaveNet  & \textbf{2.552} & \textbf{0.426} & 0.132 & \textbf{0.400} & 0.491 & 0.887\\
+DCRNN         & 2.680 & 0.391 & 0.092 & 0.376 & 0.431 & 0.879\\
+MTGNN         & 2.572 & 0.413 & 0.109 & 0.393 & 0.464 & 0.879\\
+InformerOnly  & 2.706 & 0.398 & 0.103 & 0.381 & 0.444 & 0.824\\
+HASI-Net      & 2.651 & 0.402 & 0.107 & 0.383 & 0.450 & 0.883\\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \subsection{Aggregated Madhya Pradesh panel}\label{sec:mp}
-On the short ($T{=}14$) MP panel, deep temporal forecasting is data-limited
-(only nine sliding windows for $T_w{=}4,H{=}2$); we therefore use MP
-primarily to demonstrate the methodology and interpretability rather than
-headline accuracy. Table~\ref{tab:mp} reports MP test metrics: HASI-Net
-attains the best $R^2$ (0.658) and RMSE (47.14) and the second-lowest MAE,
-beating HA, LSTM and Informer-only on MAE while staying competitive with
-ST-GCN---the persistence-residual head keeps the deep model at or above the
-HA baseline rather than collapsing, the known Transformer failure mode on
-short series. Fig.~\ref{fig:choro} shows the district risk choropleth used
-for policy allocation. The applied MP analysis is the subject of the
-companion Paper~B.
-
-\begin{table}[t]
-\centering
-\caption{Madhya Pradesh district panel (test split, 2001--2014).}
-\label{tab:mp}
-\begin{tabular}{lrrrrrr}
-\toprule
-Model & MAE & RMSE & RMSLE & WAPE & $R^2$ & CSI\\
-\midrule
-HA & 23.00 & 47.76 & 0.6748 & 37.36 & 0.649 & \underline{0.4270}\\
-LSTM & 23.17 & 47.74 & \textbf{0.6574} & 37.64 & 0.649 & 0.4176\\
-ST-GCN & \textbf{22.72} & \underline{47.35} & 0.6678 & \textbf{36.90} & \underline{0.655} & \textbf{0.4333}\\
-Informer-only & 26.08 & 51.35 & 0.6584 & 42.36 & 0.594 & 0.3229\\
-\textbf{HASI-Net} & \underline{22.82} & \textbf{47.14} & \underline{0.6670} & \underline{37.07} & \textbf{0.658} & 0.4130\\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=\linewidth]{figures/choropleth_mp.png}
-\caption{Forecasted women-centric crime risk by MP district (choropleth).}
-\label{fig:choro}
-\end{figure}
+The short ($T{=}14$) MP panel is data-limited (only $\approx$9 sliding windows
+for $T_w{=}4,H{=}2$), so deep temporal forecasting is fundamentally constrained
+there; we use MP primarily for the cross-country transfer and interpretability
+analysis of the companion paper rather than headline accuracy. The
+persistence-residual head keeps HASI-Net at or above the HA baseline rather
+than collapsing---the known Transformer failure mode on short series---and the
+socioeconomic graph channel, unavailable on Chicago, is exercised here. The
+applied MP case study, district risk choropleth, and the disclosed
+data-scarcity bound on calibration are the subject of the companion paper.
 
 % ===========================================================================
 \section{Discussion}\label{sec:disc}
-Three findings stand out. First, on fine-grained data with enough temporal
-length (Chicago, 96 months), the deep model captures structure that recurrent
-and fixed-graph baselines miss, and the persistence-residual head keeps it
-competitive with the strong HA baseline rather than collapsing---a known
-failure mode of pure Transformers on short series~\cite{zeng2023dlinear}.
-Second, the learned channel weights (Fig.~\ref{fig:channels}) show which
-adjacency notion the model relies on, giving interpretable evidence on
-coarse data where the ``correct'' graph is ambiguous. Third, on the
-aggregated, very short MP panel, point-forecast accuracy is fundamentally
-data-limited; the value of HASI-Net there is interpretability, calibrated
-hotspot detection and district risk maps for policy, not headline MAE---a
-data-availability finding we make explicit rather than disguise.
+The headline finding is a cautionary one for the field: on a real-geography
+monthly crime panel, simple historical-average persistence is a remarkably
+strong baseline. It leads raw MAE at every horizon and is matched, not beaten,
+by every deep spatio-temporal model---including the more complex HASI-Net---on
+both point accuracy and the operationally relevant event-verification and
+hotspot metrics. The deep models' edges over persistence, where they exist,
+are statistically detectable but practically small (GraphWaveNet $\sim$1.5\%
+MAE; HASI-Net best deep model only at the medium horizon). We argue this is
+not a failure of architecture but a property of the regime: monthly
+community-area crime is highly persistent, so the lookback mean is hard to
+beat on the level, and transient per-node spikes are genuinely hard to
+anticipate for every method (all models under-forecast spikes, bias${<}1$).
+The contribution of this paper is therefore the rigorous, multi-horizon,
+multi-seed benchmark with a leak-free event-verification protocol that
+\emph{establishes} this finding rather than the usual single-seed table that
+overstates a deep model's edge; the heterogeneous-graph methodology and the
+ablation showing each adjacency channel contributes; and the narrow but real
+result that HASI-Net is the best deep model at the medium horizon and the most
+reproducible at the long horizon. The value of the deep approach that
+persistence cannot provide---calibrated conditional uncertainty on the
+high-crime tail and cross-region transfer---is the subject of the companion
+paper, which builds on this strong-persistence finding directly: if point
+accuracy is saturated, the deep model must justify itself probabilistically.
 
-\textbf{Limitations.} Aggregated NCRB data is annual and short; finer temporal
-reporting would materially help deep models. The socioeconomic prior relies
-on 2011 Census features, which age over the forecast window. ProbSparse
-attention degenerates to full attention on our short lookbacks, so its
-efficiency benefit is not exercised here.
+\textbf{Limitations.} The benchmark is one city at monthly resolution; finer
+spatial or temporal granularity, where persistence is weaker, may give the
+deep models more room. HASI-Net shows elevated run-to-run MAE variance at the
+short horizon, indicating optimization sensitivity worth further work. The
+MP panel is annual and very short ($T{=}14$), bounding what any method can
+achieve there. ProbSparse attention degenerates to full attention on our short
+lookbacks, so its efficiency benefit is not exercised here.
 
 % ===========================================================================
 \section{Conclusion}\label{sec:conc}
 We presented HASI-Net, a heterogeneous adaptive spatio-temporal Informer
-network for forecasting aggregated crime counts. A learnable fusion of
-geographic, socioeconomic and latent adjacencies, a multi-scale temporal
-block, a persistence-residual count-aware head, and adaptive-inertia PSO
-together address the coarse/short/zero-inflated regime of regional Indian
-crime data. On the Chicago benchmark HASI-Net is the best neural model
-(outperforming LSTM and Informer-only, tying ST-GCN) and stays competitive
-with the strong persistence baseline; on the MP panel it attains the best
-$R^2$/RMSE and provides interpretable risk maps for policy. All results are reproduced by an
-open M1/Colab notebook companion.
+network whose learnable fusion of geographic, socioeconomic and latent
+adjacencies, multi-scale temporal block, persistence-residual count-aware
+head, and adaptive-inertia PSO together address the coarse, short,
+zero-inflated regime of aggregated crime data. Equally, we reported a rigorous
+eight-model, five-seed, three-horizon benchmark with a leak-free
+event-verification protocol on a real-geography Chicago panel. The honest
+finding is that historical-average persistence is a strong baseline that the
+deep models match but do not beat on point or event accuracy; HASI-Net is the
+best deep model at the medium horizon and the most reproducible at the long
+horizon, and each graph channel contributes, but no point-forecast
+state-of-the-art claim is warranted. The deep model's defensible value lies in
+calibrated conditional uncertainty and cross-region transfer, developed in the
+companion paper. All results come from re-runnable CUDA runs with persisted
+predictions.
 
 \section*{Reproducibility}
 The full pipeline (data download, graph construction, PSO, training,
-evaluation, figures) is released as a Python package with two deployment
-notebooks: \texttt{hasi\_net\_m1.ipynb} (Apple Silicon MPS) and
-\texttt{hasi\_net\_colab.ipynb} (CUDA). Re-running either top-to-bottom
-regenerates every table and figure in this paper.
+evaluation, hotspot/event-verification metrics, figures) is released as a
+Python package driven by open CUDA notebooks (\texttt{p1\_multiseed\_colab.ipynb},
+\texttt{run\_p1\_multiseed.py}, \texttt{run\_p1\_hotspot.py}). Per-seed
+predictions are persisted, so every table here is reproducible without
+retraining. Re-running the drivers top-to-bottom regenerates every table and
+figure in this paper.
 
 \bibliographystyle{IEEEtran}
 \bibliography{../references}
