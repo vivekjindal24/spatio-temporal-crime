@@ -96,28 +96,52 @@ def _pinball(q: torch.Tensor, y: torch.Tensor, tau: float) -> torch.Tensor:
 
 def calibrated_loss(logits: Dict[str, torch.Tensor], target: torch.Tensor,
                     gate_logit: torch.Tensor, quantiles: List[float],
-                    pinball_weight: float = 0.5) -> torch.Tensor:
-    """Gated ZINB/NB NLL + pinball loss on the quantile head.
+                    pinball_weight: float = 0.5, nb_weight: float = 0.05
+                    ) -> torch.Tensor:
+    """Multi-objective calibrated loss, aligned with the metrics we report
+    (MAE, CRPS, coverage) -- Paper 2.
 
-    ``gate_logit`` is a per-crime parameter; sigmoid(gate) is the ZINB weight.
+    Three terms, all kept in log1p space so none dominates by raw count scale:
+
+    * **point** -- log1p-space MSE on the mean (softplus(log_mu)=log1p(mu),
+      i.e. RMSLE), MAE-aligned and stable. It keeps the persistence carry
+      (delta ~ 0) so the model starts at the HA baseline and improves from
+      there, rather than drifting off it.
+    * **pinball** -- pinball / quantile loss on the monotone quantile forecast,
+      *in log1p space*. This is a proper scoring rule that directly drives the
+      CRPS and central-interval coverage we report.
+    * **nb_reg** -- a small gated ZINB/NB negative-log-likelihood regulariser
+      that keeps the dispersion (alpha), zero-inflation (pi) and the
+      sparsity-initialised per-crime gate well-posed; weighted small so it does
+      not pull training away from the MAE/CRPS objectives.
+
+    Driving with a pure NB likelihood on the small, trended panels instead pulls
+    the mean off the persistence carry: the likelihood falls while point MAE
+    *rises*, and the quantiles mis-centre so coverage collapses -- an objective
+    mismatch observed on both Chicago and MP. RMSLE + pinball aligns training
+    with the reported metrics, so the calibrated head matches the point head's
+    MAE while adding calibrated uncertainty.
+
+    ``gate_logit``: per-crime ZINB/NB gate (sigmoid(gate) is the ZINB weight).
     ``target``: [B, H, N, C]; ``logits`` keys: log_mu, log_alpha, pi_logit,
     quantiles ([B, H, N, C, |Q|]).
     """
+    log_y = torch.log1p(target)
+    # Point: log1p-space MSE on the mean (softplus(log_mu) = log1p(mu) = RMSLE).
+    point = ((torch.nn.functional.softplus(logits["log_mu"]) - log_y) ** 2).mean()
+    # Pinball on the quantile forecast in log1p space (scale-balanced with point).
+    q = logits["quantiles"].clamp(min=0.0)                         # [B,H,N,C,|Q|]
+    tau_t = torch.tensor(quantiles, dtype=q.dtype, device=q.device)
+    diff = log_y.unsqueeze(-1) - torch.log1p(q)                   # [B,H,N,C,|Q|]
+    pin = torch.maximum(tau_t * diff, (tau_t - 1.0) * diff)
+    pin = pin.mean()
+    # Small gated ZINB/NB regulariser (dispersion / zero-inflation / gate).
     nb = NegativeBinomialLoss()(logits["log_mu"], logits["log_alpha"], target)
     zinb = ZeroInflatedNB()(logits["log_mu"], logits["log_alpha"],
                             logits["pi_logit"], target)
-    g = torch.sigmoid(gate_logit).clamp(min=1e-4, max=1 - 1e-4)   # [C]
-    # Broadcast per-crime gate over [B, H, N, C].
-    nll = g * zinb + (1.0 - g) * nb                              # [B,H,N,C]
-    # Pinball over quantile levels, averaged.
-    q = logits["quantiles"]                                      # [B,H,N,C,|Q|]
-    y = target.unsqueeze(-1)
-    pin = torch.zeros_like(nll)
-    tau_t = torch.tensor(quantiles, dtype=q.dtype, device=q.device)
-    diff = y - q
-    pin = torch.maximum(tau_t * diff, (tau_t - 1.0) * diff)      # [B,H,N,C,|Q|]
-    pin = pin.mean()
-    return nll.mean() + pinball_weight * pin
+    g = torch.sigmoid(gate_logit).clamp(min=1e-4, max=1 - 1e-4)    # [C]
+    nb_reg = (g * zinb + (1.0 - g) * nb).mean()
+    return point + pinball_weight * pin + nb_weight * nb_reg
 
 
 @dataclass

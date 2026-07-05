@@ -319,10 +319,14 @@ def run_transfer_vs_scratch(cfg_chi: Config, cfg_mp: Config, seeds: List[int],
     df.to_csv(RESULTS_DIR / f"transfer_{tag}_perseed.csv", index=False)
     agg = df.groupby("condition")[METRIC_COLS + CAL_COLS].agg(["mean", "std"])
     agg.to_csv(RESULTS_DIR / f"transfer_{tag}_meanstd.csv")
+    # Flatten the multi-index columns ("MAE","mean") -> "MAE_mean" so the
+    # summary JSON has only string keys (json.dumps rejects tuple keys).
+    agg_flat = agg.round(4).copy()
+    agg_flat.columns = ["_".join(map(str, c)) for c in agg_flat.columns]
     summary = {"tag": tag, "seeds": seeds, "lam": lam,
                "mp_zero_fraction": zf_mp,
                "categories": mp_panel["categories"],
-               "mean_std": agg.round(4).to_dict()}
+               "mean_std": agg_flat.to_dict(orient="index")}
     (RESULTS_DIR / f"summary_{tag}_transfer.json").write_text(
         json.dumps(summary, indent=2, default=_json_default))
     if verbose:
