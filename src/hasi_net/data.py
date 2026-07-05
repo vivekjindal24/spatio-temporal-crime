@@ -464,26 +464,6 @@ def build_chicago_panel(cfg: Config) -> Panel:
     )
 
 
-def _socrata_url(base: str, select: str, where: str,
-                 limit: int, offset: int) -> str:
-    """Build a fully URL-encoded Socrata query string.
-
-    ``requests``' params encoder escapes ``%`` (the SoQL wildcard) to ``%25``,
-    which silently breaks ``like '%...%'`` filters. We therefore build the URL by
-    hand with :func:`urllib.parse.quote`, marking ``%`` safe so the wildcards
-    reach Socrata verbatim while spaces / quotes / parens are properly encoded.
-    """
-    from urllib.parse import quote
-
-    def _enc(s: str) -> str:
-        # Keep ``%`` (wildcard), ``'`` (string literals) and ``()`` unescaped
-        # to keep the SoQL readable; Socrata accepts the raw forms in a query.
-        return quote(s, safe="%'()")
-
-    return (f"{base}?$select={_enc(select)}&$where={_enc(where)}"
-            f"&$limit={limit}&$offset={offset}")
-
-
 def _classify_austin(crime_type: str, family_violence: bool) -> Optional[str]:
     """Map an Austin incident to one unified crime channel (disjoint).
 
@@ -528,16 +508,24 @@ def build_austin_panel(cfg: Config) -> Panel:
         rows: List[dict] = []
         offset = 0
         # Server-side filter: keep DV incidents plus every crime_type that maps
-        # to a channel. ``upper(...) like`` is SoQL-case-sensitive on the raw
-        # column, so we uppercase it. Wildcards (%) are preserved verbatim by
-        # _socrata_url (see the helper docstring).
+        # to a channel. ``upper(...) like`` is case-sensitive on the raw column,
+        # so we uppercase it. Pass the filter via ``requests`` params (NOT a
+        # pre-encoded URL string): requests' encoder turns the SoQL wildcard
+        # ``%`` into ``%25`` on the wire, which is REQUIRED -- a raw ``%S``
+        # (from ``%SEXUAL%``) is an invalid percent-escape and Austin's edge
+        # proxy rejects it with HTTP 400. Socrata then decodes ``%25`` back to
+        # the ``%`` wildcard. (Chicago's builder avoids this only because its
+        # ``primary_type in (...)`` filter has no wildcards.)
         keys = (AUSTIN_RAPE_KEYS + AUSTIN_KIDNAP_KEYS + AUSTIN_ASSAULT_KEYS)
         or_like = " OR ".join(f"upper(crime_type) like '%{k}%'" for k in keys)
         where = f"family_violence='Y' OR {or_like}"
         select = "council_district,crime_type,occ_date,family_violence"
+        headers = {"User-Agent": "HASI-Net/1.0 (research; spatio-temporal-crime)"}
         while True:
-            url = _socrata_url(AUSTIN_API, select, where, 50000, offset)
-            r = requests.get(url, timeout=180)
+            params = {"$select": select, "$where": where,
+                      "$limit": 50000, "$offset": offset}
+            r = requests.get(AUSTIN_API, params=params, timeout=180,
+                             headers=headers)
             r.raise_for_status()
             batch = r.json()
             if not batch:
@@ -553,6 +541,13 @@ def build_austin_panel(cfg: Config) -> Panel:
 
     aus["occ_date"] = pd.to_datetime(aus["occ_date"], errors="coerce")
     aus = aus.dropna(subset=["occ_date", "council_district"])
+    # Restrict to the configured year window (the Socrata dataset spans
+    # 2003-2024; we keep 2015-2024 so Austin matches Chicago's 120-month panel
+    # for the apples-to-apples monthly transfer). chicago_year_start/end are
+    # reused as the Austin window -- they only feed this filter.
+    ystart = pd.Timestamp(year=cfg.chicago_year_start, month=1, day=1)
+    yend = pd.Timestamp(year=cfg.chicago_year_end, month=12, day=31)
+    aus = aus[(aus["occ_date"] >= ystart) & (aus["occ_date"] <= yend)]
     # Council districts are the integers 1..10; coerce and keep the valid set.
     aus["council_district"] = pd.to_numeric(aus["council_district"],
                                             errors="coerce")
