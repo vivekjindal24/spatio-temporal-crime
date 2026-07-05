@@ -250,36 +250,48 @@ def evaluate_calibrated(model, loader, device, horizon):
 
 def run_transfer_vs_scratch(cfg_chi: Config, cfg_mp: Config, seeds: List[int],
                             lam: float = 1e-3, tag: str = "p2",
-                            force: bool = False, verbose: bool = True
+                            force: bool = False, verbose: bool = True,
+                            source: str = "chicago", target: str = "mp",
+                            pretrain_tag: Optional[str] = None
                             ) -> pd.DataFrame:
-    """Pretrain once on Chicago, then compare transfer-vs-scratch on MP across
-    seeds. Returns a per-seed/condition table; writes mean+/-std CSV + JSON."""
-    device = select_device(cfg_mp.device)
-    chi_panel = _assemble(get_dataset("chicago", cfg_chi), cfg_chi)
-    mp_panel = _assemble(get_dataset("mp", cfg_mp), cfg_mp)
-    zf_mp = _train_zero_fraction(mp_panel, cfg_mp)
+    """Pretrain once on the source region, then compare transfer-vs-scratch on
+    the target region across seeds. Returns a per-seed/condition table; writes
+    mean+/-std CSV + JSON.
 
-    # --- Pretrain once on Chicago (seed 42) ---------------------------------
-    pre_path = RESULTS_DIR / f"transfer_{tag}_pretrain.json"
+    Defaults (source="chicago", target="mp") preserve the original Chicago->MP
+    behaviour. For the apples-to-apples Chicago->Austin transfer call with
+    target="austin" and a distinct ``tag`` (per-seed files are tag-keyed).
+    ``pretrain_tag`` (defaults to ``tag``) names the cached source pretrain, so
+    multiple targets can REUSE one Chicago pretrain instead of re-training it:
+    e.g. tag="p2chi_aus", pretrain_tag="p2" reuses ``hasi_net_p2_pretrain.pt``.
+    """
+    device = select_device(cfg_mp.device)
+    pretrain_tag = pretrain_tag or tag
+    src_panel = _assemble(get_dataset(source, cfg_chi), cfg_chi)
+    tgt_panel = _assemble(get_dataset(target, cfg_mp), cfg_mp)
+    zf_tgt = _train_zero_fraction(tgt_panel, cfg_mp)
+
+    # --- Pretrain once on the source region (seed 42) ----------------------
+    pre_path = RESULTS_DIR / f"transfer_{pretrain_tag}_pretrain.json"
     pretrained_state = None
-    if pre_path.exists() and not force and (RESULTS_DIR / f"hasi_net_{tag}_pretrain.pt").exists():
+    if pre_path.exists() and not force and (RESULTS_DIR / f"hasi_net_{pretrain_tag}_pretrain.pt").exists():
         if verbose:
-            print("Pretrain: cached")
-        pretrained_state = torch.load(RESULTS_DIR / f"hasi_net_{tag}_pretrain.pt",
+            print(f"Pretrain ({source}): cached [{pretrain_tag}]")
+        pretrained_state = torch.load(RESULTS_DIR / f"hasi_net_{pretrain_tag}_pretrain.pt",
                                       map_location=device)
     else:
         if verbose:
-            print("Pretraining on Chicago ...")
+            print(f"Pretraining on {source} ...")
         set_seed(42)
-        tr, va, _ = _loaders(chi_panel, cfg_chi)
-        pm = build_model(cfg_chi, chi_panel, device)
-        pm.set_gate_from_sparsity(_train_zero_fraction(chi_panel, cfg_chi))
+        tr, va, _ = _loaders(src_panel, cfg_chi)
+        pm = build_model(cfg_chi, src_panel, device)
+        pm.set_gate_from_sparsity(_train_zero_fraction(src_panel, cfg_chi))
         train_one(pm, cfg_chi, tr, va, device, verbose=verbose)
         pretrained_state = {k: v.detach() for k, v in pm.state_dict().items()}
-        torch.save(pm.state_dict(), RESULTS_DIR / f"hasi_net_{tag}_pretrain.pt")
+        torch.save(pm.state_dict(), RESULTS_DIR / f"hasi_net_{pretrain_tag}_pretrain.pt")
         pre_path.write_text(json.dumps({"seed": 42, "done": True}))
 
-    # --- Per seed: transfer vs scratch on MP --------------------------------
+    # --- Per seed: transfer vs scratch on the target region ----------------
     rows = []
     for seed in seeds:
         for cond in ("transfer", "scratch"):
@@ -290,9 +302,9 @@ def run_transfer_vs_scratch(cfg_chi: Config, cfg_mp: Config, seeds: List[int],
                     print(f"[seed {seed}/{cond}] cached")
                 continue
             set_seed(seed)
-            tr, va, te = _loaders(mp_panel, cfg_mp)
-            model = build_model(cfg_mp, mp_panel, device)
-            model.set_gate_from_sparsity(zf_mp)
+            tr, va, te = _loaders(tgt_panel, cfg_mp)
+            model = build_model(cfg_mp, tgt_panel, device)
+            model.set_gate_from_sparsity(zf_tgt)
             transferred = []
             if cond == "transfer":
                 transferred, _ = transfer_load(model, pretrained_state)
@@ -323,13 +335,14 @@ def run_transfer_vs_scratch(cfg_chi: Config, cfg_mp: Config, seeds: List[int],
     # summary JSON has only string keys (json.dumps rejects tuple keys).
     agg_flat = agg.round(4).copy()
     agg_flat.columns = ["_".join(map(str, c)) for c in agg_flat.columns]
-    summary = {"tag": tag, "seeds": seeds, "lam": lam,
-               "mp_zero_fraction": zf_mp,
-               "categories": mp_panel["categories"],
+    summary = {"tag": tag, "pretrain_tag": pretrain_tag, "seeds": seeds,
+               "lam": lam, "source": source, "target": target,
+               "target_zero_fraction": zf_tgt,
+               "categories": tgt_panel["categories"],
                "mean_std": agg_flat.to_dict(orient="index")}
     (RESULTS_DIR / f"summary_{tag}_transfer.json").write_text(
         json.dumps(summary, indent=2, default=_json_default))
     if verbose:
-        print("\n=== transfer vs scratch (mean) ===")
+        print(f"\n=== transfer vs scratch ({source}->{target}, mean) ===")
         print(agg.round(4))
     return df

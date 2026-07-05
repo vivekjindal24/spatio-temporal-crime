@@ -54,10 +54,28 @@ def main() -> None:
                     lr=5e-4, hidden_dim=64, loss_type="nb",
                     calibrated_head=True, pso_enabled=False,
                     patience=15)
+    # Austin: monthly + multi-crime like Chicago (apples-to-apples transfer),
+    # 10 council districts, clean family_violence DV flag. Same temporal window
+    # as Chicago (lookback 12 / horizon 3) so the Chicago-pretrained temporal
+    # encoder transfers with no re-windowing.
+    cfg_aus = Config(target_region=MADHYA_PRADESH, use_chicago_benchmark=True,
+                     chicago_year_start=2015, chicago_year_end=2024,
+                     device="cuda", lookback=12, horizon=3,
+                     epochs=80, batch_size=64, lr=1e-3, hidden_dim=64,
+                     loss_type="nb", calibrated_head=True, pso_enabled=False)
 
     print("=== 1. Cross-region transfer (Chicago -> MP) ===")
     run_transfer_vs_scratch(cfg_chi, cfg_mp, seeds=seeds, lam=1e-3,
                             tag="p2", force=args.force, verbose=True)
+
+    print("\n=== 1b. Cross-region transfer (Chicago -> Austin) ===")
+    # Reuses the Chicago pretrain cached by step 1 (pretrain_tag="p2") -- no
+    # duplicate pretraining. Apples-to-apples monthly transfer; the strong
+    # transfer case vs the data-scarce Chicago->MP.
+    run_transfer_vs_scratch(cfg_chi, cfg_aus, seeds=seeds, lam=1e-3,
+                            tag="p2chi_aus", pretrain_tag="p2",
+                            source="chicago", target="austin",
+                            force=args.force, verbose=True)
 
     print("\n=== 2a. Calibrated vs point head (MP) ===")
     run_calibrated_vs_point("mp", cfg_mp, seeds=seeds, tag="p2",
@@ -65,6 +83,10 @@ def main() -> None:
 
     print("\n=== 2b. Calibrated vs point head (Chicago) ===")
     run_calibrated_vs_point("chicago", cfg_chi, seeds=seeds, tag="p2",
+                            force=args.force, verbose=True)
+
+    print("\n=== 2c. Calibrated vs point head (Austin) ===")
+    run_calibrated_vs_point("austin", cfg_aus, seeds=seeds, tag="p2austin",
                             force=args.force, verbose=True)
 
     print("\n=== 3. Missing-data robustness (MP) ===")

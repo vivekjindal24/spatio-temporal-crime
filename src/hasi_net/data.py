@@ -44,6 +44,19 @@ DISTRICT_GEOJSON = (
     "india_district_map.geojson"
 )
 CHICAGO_API = "https://data.cityofchicago.org/resource/ijzp-q8t2.json"
+# Austin (TX) Crime Reports (Socrata). Unlike Chicago, Austin carries an explicit
+# ``family_violence`` Y/N flag, so the domestic-violence channel is a direct
+# measurement rather than a domestic-BATTERY proxy. The dataset has no
+# zip_code / latitude / longitude fields -- its only clean reproducible
+# geography is ``council_district`` (10 nodes); see build_austin_panel + the
+# Austin branch of graph.build_geographic_adjacency.
+AUSTIN_API = "https://data.austintexas.gov/resource/fdj4-gpfu.json"
+# Keyword substrings (upper-cased) used to fetch and classify Austin crime_type
+# strings, which are far messier than Chicago's primary_type. The
+# family_violence flag (not these strings) drives the DV/assault split.
+AUSTIN_RAPE_KEYS = ("SEXUAL", "SODOMY", "RAPE")
+AUSTIN_KIDNAP_KEYS = ("KIDNAPPING",)
+AUSTIN_ASSAULT_KEYS = ("ASSAULT", "ASLT")
 
 # Canonical NCRB column names (2001-2014 schema) -> our internal category keys.
 NCRB_COL_MAP = {
@@ -451,9 +464,150 @@ def build_chicago_panel(cfg: Config) -> Panel:
     )
 
 
+def _socrata_url(base: str, select: str, where: str,
+                 limit: int, offset: int) -> str:
+    """Build a fully URL-encoded Socrata query string.
+
+    ``requests``' params encoder escapes ``%`` (the SoQL wildcard) to ``%25``,
+    which silently breaks ``like '%...%'`` filters. We therefore build the URL by
+    hand with :func:`urllib.parse.quote`, marking ``%`` safe so the wildcards
+    reach Socrata verbatim while spaces / quotes / parens are properly encoded.
+    """
+    from urllib.parse import quote
+
+    def _enc(s: str) -> str:
+        # Keep ``%`` (wildcard), ``'`` (string literals) and ``()`` unescaped
+        # to keep the SoQL readable; Socrata accepts the raw forms in a query.
+        return quote(s, safe="%'()")
+
+    return (f"{base}?$select={_enc(select)}&$where={_enc(where)}"
+            f"&$limit={limit}&$offset={offset}")
+
+
+def _classify_austin(crime_type: str, family_violence: bool) -> Optional[str]:
+    """Map an Austin incident to one unified crime channel (disjoint).
+
+    Priority order mirrors Chicago so the four channels never double-count an
+    incident:
+
+    1. sexual-assault / rape (any keyword) -- regardless of the DV flag, since
+       sexual assault is the headline crime of the channel (Chicago routes
+       CRIMINAL SEXUAL ASSAULT -> rape regardless of its domestic flag too);
+    2. kidnapping;
+    3. otherwise, the ``family_violence`` flag -> domestic_violence (the clean
+       signal Austin exposes, unlike Chicago's battery proxy);
+    4. otherwise, assault / aggravated-assault keywords -> assault.
+
+    Incidents matching none of these are dropped.
+    """
+    ct = str(crime_type).upper()
+    if any(k in ct for k in AUSTIN_RAPE_KEYS):
+        return "rape_sexual_assault"
+    if any(k in ct for k in AUSTIN_KIDNAP_KEYS):
+        return "kidnapping_abduction"
+    if family_violence:
+        return "domestic_violence"
+    if any(k in ct for k in AUSTIN_ASSAULT_KEYS):
+        return "assault"
+    return None
+
+
+def build_austin_panel(cfg: Config) -> Panel:
+    """Assemble the Austin panel aggregated to council_district x month.
+
+    Pulls incidents via the Socrata JSON API, keeping only the rows that map to
+    one of the four unified crimes (family-violence incidents, plus assault /
+    sexual-assault / kidnapping keywords). The ``family_violence`` flag is the
+    authoritative domestic-violence signal; ``crime_type`` keywords supply the
+    sexual-assault, kidnapping and non-DV assault channels. Aggregated to the 10
+    Austin city council districts (the dataset's only clean reproducible
+    geography) by month, over the configured year window.
+    """
+    dest = DATA_DIR / "austin_crimes_v1.parquet"
+    if not dest.exists():
+        rows: List[dict] = []
+        offset = 0
+        # Server-side filter: keep DV incidents plus every crime_type that maps
+        # to a channel. ``upper(...) like`` is SoQL-case-sensitive on the raw
+        # column, so we uppercase it. Wildcards (%) are preserved verbatim by
+        # _socrata_url (see the helper docstring).
+        keys = (AUSTIN_RAPE_KEYS + AUSTIN_KIDNAP_KEYS + AUSTIN_ASSAULT_KEYS)
+        or_like = " OR ".join(f"upper(crime_type) like '%{k}%'" for k in keys)
+        where = f"family_violence='Y' OR {or_like}"
+        select = "council_district,crime_type,occ_date,family_violence"
+        while True:
+            url = _socrata_url(AUSTIN_API, select, where, 50000, offset)
+            r = requests.get(url, timeout=180)
+            r.raise_for_status()
+            batch = r.json()
+            if not batch:
+                break
+            rows.extend(batch)
+            if len(batch) < 50000:
+                break
+            offset += 50000
+        aus = pd.DataFrame(rows)
+        aus.to_parquet(dest)
+    else:
+        aus = pd.read_parquet(dest)
+
+    aus["occ_date"] = pd.to_datetime(aus["occ_date"], errors="coerce")
+    aus = aus.dropna(subset=["occ_date", "council_district"])
+    # Council districts are the integers 1..10; coerce and keep the valid set.
+    aus["council_district"] = pd.to_numeric(aus["council_district"],
+                                            errors="coerce")
+    aus = aus.dropna(subset=["council_district"])
+    aus["council_district"] = aus["council_district"].astype(int)
+    aus = aus[aus["council_district"].between(1, 10)]
+    aus["month"] = aus["occ_date"].dt.to_period("M").astype(str)
+    # Coerce the family_violence flag to a boolean (Y / N).
+    aus["family_violence"] = aus["family_violence"].astype(str).str.strip()
+    aus["family_violence"] = aus["family_violence"].str.upper().eq("Y")
+
+    aus["category"] = aus.apply(
+        lambda r: _classify_austin(r["crime_type"], r["family_violence"]),
+        axis=1)
+    aus = aus.dropna(subset=["category"])
+
+    months = sorted(aus["month"].unique())
+    areas = sorted(aus["council_district"].unique())
+    cats = UNIFIED_CRIMES  # canonical order, shared with Chicago / NCRB
+    piv = aus.pivot_table(index=["council_district", "category"],
+                          columns="month", values="occ_date", aggfunc="count",
+                          fill_value=0)
+    piv = piv.reindex(index=pd.MultiIndex.from_product([areas, cats],
+                      names=["council_district", "category"]), columns=months,
+                      fill_value=0)
+    counts = piv.values.reshape(len(areas), len(cats), len(months))
+    counts = np.transpose(counts, (2, 0, 1)).astype(np.float32)
+
+    # No socioeconomic features for Austin districts in this pipeline -> use
+    # identity (ones) so the graph branch still functions, matching Chicago.
+    node_feats = np.ones((len(areas), 1), dtype=np.float32)
+    return Panel(
+        counts=counts,
+        node_feats=node_feats,
+        years=months,
+        districts=[f"CD{a}" for a in areas],
+        categories=list(cats),
+        meta={"region": "Austin",
+              "aggregation": "council_district x month",
+              "n_nodes": len(areas),
+              "crimes": "rape_sexual_assault (sexual assault / sodomy), "
+                        "domestic_violence (family_violence=Y, direct flag), "
+                        "kidnapping_abduction, assault (non-DV assault)",
+              "source": "City of Austin Open Data (fdj4-gpfu)",
+              "dv_signal": "explicit family_violence flag (not a proxy)",
+              "note": "10 council districts: the dataset's only clean "
+                      "reproducible geography (no zip/lat-lon). Disclosed."},
+    )
+
+
 def get_dataset(name: str, cfg: Config) -> Panel:
     if name.lower() in {"mp", "madhya_pradesh"}:
         return build_mp_panel(cfg)
     if name.lower() == "chicago":
         return build_chicago_panel(cfg)
+    if name.lower() == "austin":
+        return build_austin_panel(cfg)
     raise ValueError(f"unknown dataset: {name}")

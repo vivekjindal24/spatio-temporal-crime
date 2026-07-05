@@ -37,6 +37,12 @@ CHICAGO_AREAS_GEOJSON = (
     "https://raw.githubusercontent.com/RandomFractals/ChicagoCrimes/master/"
     "data/chicago-community-areas.geojson"
 )
+# Austin city council district boundaries (10 districts, EPSG:4326), keyed by
+# the integer ``district_number`` (1..10). Sourced from the City of Austin Open
+# Data portal so A_geo for Austin is REAL rook contiguity, not the hash fallback.
+AUSTIN_COUNCIL_GEOJSON = (
+    "https://data.austintexas.gov/resource/w3v2-cj58.geojson"
+)
 
 # Panel district name -> datameet 2011 shapefile name, for the few MP districts
 # the shapefile still records under their pre-2013 names. After data.py
@@ -66,6 +72,29 @@ def _symmetrize(A: np.ndarray) -> np.ndarray:
 
 def _is_chicago(districts: List[str]) -> bool:
     return bool(districts) and re.fullmatch(r"CA\d+", str(districts[0])) is not None
+
+
+def _is_austin(districts: List[str]) -> bool:
+    return bool(districts) and re.fullmatch(r"CD\d+", str(districts[0])) is not None
+
+
+def _load_austin_districts():
+    """Download the Austin council-district GeoJSON. Returns a GeoDataFrame
+    indexed by integer district number (1..10)."""
+    import geopandas as gpd
+    dest = DATA_DIR / "austin_council_districts.geojson"
+    download(AUSTIN_COUNCIL_GEOJSON, dest, timeout=120)
+    gdf = gpd.read_file(dest)
+    num_col = next((c for c in ["district_number", "council_district",
+                                "council_dist", "district"]
+                    if c in gdf.columns), None)
+    if num_col is None:
+        raise RuntimeError("Austin council-district GeoJSON missing "
+                           "district-number column")
+    gdf["__n"] = pd.to_numeric(gdf[num_col], errors="coerce").astype("Int64")
+    gdf = gdf.dropna(subset=["__n"]).drop_duplicates(subset="__n", keep="first")
+    gdf = gdf.set_index("__n")
+    return gdf
 
 
 def _load_india_districts(cfg: Config):
@@ -173,14 +202,24 @@ def build_geographic_adjacency(districts: List[str], cfg: Config) -> np.ndarray:
 
     Indian districts (MP panel): datameet Census 2011 shapefile, rook
     contiguity, centroid-kNN for post-2011 districts. Chicago community areas:
-    City of Chicago GeoJSON, rook contiguity. Falls back to a deterministic
-    centroid-kNN only if boundary download/parse fails (logged in meta).
+    City of Chicago GeoJSON, rook contiguity. Austin council districts: City of
+    Austin GeoJSON, rook contiguity. Falls back to a deterministic centroid-kNN
+    only if boundary download/parse fails (logged in meta).
     """
     n = len(districts)
     A = np.zeros((n, n), dtype=np.float32)
     try:
         if _is_chicago(districts):
             gdf = _load_chicago_areas()
+
+            def key_for(d):
+                try:
+                    return int(re.sub(r"\D", "", d))
+                except Exception:
+                    return None
+            A = _rook_from_gdf(gdf, key_for, districts, cfg)
+        elif _is_austin(districts):
+            gdf = _load_austin_districts()
 
             def key_for(d):
                 try:
