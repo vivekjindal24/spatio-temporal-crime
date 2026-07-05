@@ -1,0 +1,33 @@
+{
+  "tag": "p2cc",
+  "dataset": "austin",
+  "seeds": [
+    42,
+    1,
+    2,
+    3,
+    4
+  ],
+  "conditions": {
+    "calibrated": {
+      "coverage80_mean": 0.7902380952380952,
+      "conditional_gap_mean": 0.13806637806637806,
+      "low_mean": 0.8344062153163152,
+      "med_mean": 0.7472222222222222,
+      "high_mean": 0.7833131801692865,
+      "top_decile_mean": 0.7873015873015872,
+      "per_node_coverage_std_mean": 0.03550083515370108,
+      "sharpness80_mean": 36.534417724609376
+    },
+    "conformal": {
+      "coverage80_mean": 0.7930952380952381,
+      "conditional_gap_mean": 0.226984126984127,
+      "low_mean": 0.8293007769145394,
+      "med_mean": 0.825,
+      "high_mean": 0.7230955259975816,
+      "top_decile_mean": 0.573015873015873,
+      "per_node_coverage_std_mean": 0.16810016183611542,
+      "sharpness80_mean": 14.21293638762495
+    }
+  }
+}

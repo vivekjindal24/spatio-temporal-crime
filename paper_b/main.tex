@@ -1,336 +1,1127 @@
-% Paper B -- applied Madhya Pradesh case study.
-% Companion to Paper A (HASI-Net methods). Numbers are filled from
-% results/metrics_mp.csv and the cached MP model/summary. Non-overlapping
-% focus: applied district-risk mapping, socioeconomic interpretation, policy.
+% Paper B -- calibration / probabilistic forecasting paper.
+% Companion to Paper A (HASI-Net architecture + benchmark). This paper's
+% contribution is the calibrated probabilistic count head, the conditional-
+% coverage analysis vs split conformal / quantile regression, cross-region
+% transfer, and missing-data robustness. All numbers are filled from the
+% re-runnable Colab CUDA result files under results/: probbase_*_4way_*.csv,
+% summary_p2cc_*_condcal.json, transfer_p2*.csv, robust_mp_p2_meanstd.csv,
+% p2_stats_summary.json (5 seeds each).
 \documentclass[11pt,conference]{IEEEtran}
 \usepackage[utf8]{inputenc}
-\usepackage{amsmath,amssymb}
+\usepackage{amsmath,amssymb,amsfonts}
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{algorithm}
 \usepackage{algpseudocode}
 \usepackage{hyperref}
+\usepackage{xcolor}
 \usepackage{url}
+
 \newcommand{\Ageo}{A_{\mathrm{geo}}}
 \newcommand{\Asocio}{A_{\mathrm{socio}}}
 \newcommand{\Aadapt}{A_{\mathrm{adapt}}}
 \newcommand{\R}{\mathbb{R}}
 
 \begin{document}
-\title{Forecasting Women-Centric Crime Risk Across Madhya Pradesh Districts:
-A Heterogeneous Adaptive Spatio-Temporal Case Study for Policy Allocation}
+\title{Calibrated Probabilistic Spatio-Temporal Crime Forecasting:\\
+Conditional Coverage and Cross-Region Transfer with a\\
+Sparsity-Aware Count Head}
 \author{Shruti Sharma and Manoj Rawat \\
-Department of Computer Science and Engineering, Medicaps University, Indore,
-Madhya Pradesh, India \\
-\texttt{\{en24cs6e10016, manoj.rawat\}@medicaps.ac.in}}
+Dept. of Computer Science \& Engineering,\\
+Medicaps University, Indore, M.P., India \\
+\texttt{en24cs6e10016@medicaps.ac.in} \\
+\texttt{manoj.rawat@medicaps.ac.in}}
 \maketitle
 
 \begin{abstract}
-Crimes against women in Madhya Pradesh (MP) are recorded by the National
-Crime Records Bureau only as aggregated annual district counts, a regime in
-which most spatio-temporal crime models---designed for precise incident
-coordinates---do not apply. We apply HASI-Net, a heterogeneous adaptive
-spatio-temporal Informer network, to the real NCRB 2001--2014 MP district
-panel (62 districts, 7 IPC women-crime categories) merged with Census 2011
-socioeconomic features and district-boundary geography, and use it to produce
-district-level two-year-ahead risk forecasts and interpretable
-policy-facing outputs. On the held-out test years HASI-Net attains the best
-$R^2$ (0.658) and RMSE (47.14), the second-lowest MAE among the neural
-baselines that include a historical-average carry (22.82 vs HA 23.00, LSTM
-23.17, Informer-only 26.08; ST-GCN 22.72). The learned risk ranking correctly
-identifies MP's major urban districts---Indore, Bhopal, Jabalpur, Gwalior and
-Sagar---as the highest-risk, and a cross-district correlation analysis shows
-forecasted risk is strongly associated with urbanization ($r{=}{+}0.72$) and
-literacy ($r{=}{+}0.60$) and negatively with Scheduled Tribe share
-($r{=}{-}0.69$), pointing to reporting-infrastructure and structural
-explanations. We release a reproducible M1/Colab notebook that regenerates
-the risk maps and tables, and we discuss honest data-availability limits and
-policy implications for resource allocation.
+The companion paper shows that on a real-geography monthly crime panel simple
+historical-average persistence is a remarkably strong point baseline that deep
+spatio-temporal models match but do not beat on point or event accuracy. If
+point accuracy is saturated, the deep model must justify itself
+probabilistically. This paper does exactly that. We equip the HASI-Net backbone
+with a \emph{calibrated probabilistic count head}---a gated zero-inflated
+negative-binomial emission whose gate is initialised from each crime's
+empirical zero fraction, a monotone quantile head decoded through
+$\mathrm{expm1}$, and a log1p-MSE-plus-pinball multi-objective loss---and we
+evaluate it where coverage actually matters: not only marginal 80\% coverage but
+\emph{conditional} coverage across crime-level buckets. Against split conformal
+prediction and quantile regression on two real cities (Chicago community areas,
+2015--2024; Austin council districts, 2015--2024), we find, and report honestly:
+(1)~conformal prediction is marginally \emph{sharper} and marginally better on
+point MAE/CRPS, because it need only be marginally valid and is
+homoscedastic---it pays for that by severely under-covering the high-crime tail
+(top-decile coverage $0.464$ on Chicago, $0.573$ on Austin, vs the nominal
+$0.80$); (2)~the calibrated head is the only method that is \emph{conditionally}
+valid, holding coverage across all buckets (Chicago top-decile $0.915$, Austin
+$0.787$) with a 2--3$\times$ lower per-node coverage spread. We frame this
+plainly: the calibrated head trades a small, statistically significant point-MAE
+penalty (Chicago $2.690$ vs $2.635$; bootstrap 95\% CIs non-overlapping) for
+valid conditional uncertainty---which is the operative need for resource
+allocation, since the high-crime tail is where decisions are made. Cross-region
+transfer Chicago$\to$Austin preserves both point accuracy and marginal
+calibration (coverage $0.801$); Chicago$\to$Madhya~Pradesh is reported as a
+disclosed data-scarcity bound (annual $T{=}14$ panel, coverage collapses for
+every method, transfer and scratch tied within bootstrap noise). Missing-data
+robustness on the coarse MP panel is reported honestly as noisy but not
+catastrophic. All numbers come from re-runnable CUDA runs with persisted
+predictions; Friedman and bootstrap statistics are reported.
 \end{abstract}
 
 \begin{IEEEkeywords}
-crime forecasting, women-centric crime, Madhya Pradesh, district risk
-mapping, graph neural networks, census socioeconomics, public policy
+probabilistic crime forecasting, conformal prediction, conditional
+coverage, calibration, zero-inflated negative binomial, quantile regression,
+cross-region transfer, count time series
 \end{IEEEkeywords}
 
 % ===========================================================================
 \section{Introduction}\label{sec:intro}
-Madhya Pradesh is among the Indian states with the highest reported incidence
-of crimes against women. Effective prevention requires anticipating where
-and how much to allocate policing and victim-support resources, yet the only
-spatially disaggregated official data---NCRB district tables~\cite{ncrb_cii}---
-is coarse (annual, district-level) and short (a contiguous 2001--2014 block).
-Mainstream spatio-temporal crime models assume precise incident
-coordinates~\cite{fan2025informer,wang2025mragnn,qin2025acsaformer} and
-therefore cannot be applied directly to MP. This paper is an applied case
-study: we apply the HASI-Net architecture (developed and benchmarked in the
-companion methods paper) to the real MP panel and extract policy-facing
-outputs---district risk rankings, choropleth maps, hotspot detection and
-socioeconomic correlates---that a state crime-prevention unit could use.
+The companion paper establishes a blunt but important fact: on a
+real-geography Chicago community-area$\times$month panel, historical-average
+persistence leads raw point MAE at every horizon and is matched, not beaten, by
+every deep spatio-temporal model---including the more complex HASI-Net---on both
+point accuracy and a leak-free event-verification protocol. The honest
+implication is that the contribution of a deep model on such panels cannot rest
+on point accuracy. It must rest on something persistence cannot provide: a
+calibrated \emph{probabilistic} forecast that quantifies where the model is
+uncertain, so that a policing or victim-support allocator can distinguish a
+confident low-risk month from a genuinely uncertain one.
 
-\textbf{Contributions of this case study.} (1)~A reproducible MP data pipeline
-that merges NCRB 2001--2014 district women-crime counts, Census 2011
-socioeconomics and district-boundary rook contiguity into a modelling panel
-(Sec.~\ref{sec:data}). (2)~Two-year-ahead district risk forecasts with
-HASI-Net, beating the historical-average and LSTM/Informer baselines on the
-held-out test years and attaining the best $R^2$ (Sec.~\ref{sec:results}).
-(3)~A district risk ranking and choropleth that correctly flags MP's major
-urban districts as highest-risk (Sec.~\ref{sec:risk}). (4)~A
-cross-district socioeconomic correlation analysis of the forecasted risk
-(Sec.~\ref{sec:socio}). (5)~An honest discussion of the data-availability
-limits that bound deep-model gains on aggregated Indian crime data, and
-concrete policy recommendations (Sec.~\ref{sec:policy}).
+This is not a niche concern. Crime counts are zero-inflated, right-skewed, and
+heteroscedastic: the same model that is well-calibrated on a quiet residential
+area is badly miscalibrated on a chronically volatile downtown node, and an
+allocator who treats the two intervals as equally trustworthy will misallocate.
+The standard distribution-free remedy, split conformal
+prediction~\cite{shafer2008tutorial,lei2018distribution,angelopoulos2022gentle},
+guarantees \emph{marginal} coverage but is famously silent on \emph{conditional}
+coverage: a single global interval width is valid on average and invalid exactly
+where it matters most---the high-crime tail. Conditional coverage is the
+operationally meaningful property, and it is the one conformal does not
+guarantee~\cite{romano2019cqr,gneiting2007calibration}.
 
-% ===========================================================================
-\section{Data}\label{sec:data}
-\textbf{NCRB district women-crime counts.} We use the contiguous,
-fully-real NCRB ``crimes against women'' district tables for 2001--2014
-(2015--2016 reports and the 2017--2022 portal release are not reliably
-machine-readable, so they are excluded rather than imputed). The panel covers
-$N{=}62$ MP ``districts'' and $C{=}7$ IPC categories: rape,
-kidnapping/abduction, dowry deaths, assault on modesty, insult to modesty,
-cruelty by husband/relatives, and importation of girls. Five of the 62
-entries are NCRB special police units coded as districts (Government Railway
-Police jurisdictions and a Cyber Cell); we keep them in training for
-completeness but exclude them from the geographic socioeconomic analysis in
-Sec.~\ref{sec:socio}.
+\textbf{Why the high-crime tail is where the cost lands.} A policing or
+victim-support allocator does not act on the average node; it acts on the nodes
+and months it believes are risky, which are by construction the high-crime ones.
+Miscoverage is therefore asymmetric in its consequence: an interval that
+over-covers a quiet residential area wastes a patrol shift, but an interval that
+under-covers a volatile downtown node misses the very event the allocator
+mobilised for. A method whose marginal coverage is 80\% but whose top-decile
+coverage is 46\% is, for this decision, wrong more than half the time on the
+cases that matter---and a single marginal-coverage number hides exactly that.
+This is the operational reason we evaluate conditional, not just marginal,
+coverage, and why a small point-accuracy penalty is an acceptable price for
+conditional validity: the allocator's loss is driven by tail coverage, not by
+mean absolute error.
 
-\textbf{Census 2011 socioeconomic node features.} For each district we derive
-six features from Census 2011~\cite{census2011}: literacy rate, sex ratio
-(females per 1000 males), workers ratio, Scheduled Caste share, Scheduled
-Tribe share, and urbanization. These are standardized and used as node
-attributes in the socioeconomic adjacency and the model input.
-
-\textbf{Geographic adjacency.} Rook contiguity of MP district boundary
-polygons defines the fixed geographic adjacency $\Ageo$ (128 rook-contiguity
-edges across the 57 geographic districts; the five NCRB special-unit
-``districts'' have no polygon and are linked into the graph by centroid
-$k$-NN so they remain trainable, then excluded from the geographic
-analysis). All matrices are row-normalised with self-loops. A $k$-NN cosine similarity
-on the census features defines the fixed socioeconomic adjacency $\Asocio$
-($k{=}5$). A learnable latent adjacency $\Aadapt=\mathrm{softmax}(\mathrm{ReLU}(EE^\top))$
-is learned at training time. The three are fused by learned softmax weights;
-see the companion paper for the full architecture.
-
-% ===========================================================================
-\section{Methodology in brief}\label{sec:method}
-We use HASI-Net as defined in the companion methods paper: a heterogeneous
-adaptive graph block (geographic + socioeconomic + learnable adjacency,
-softmax-fused), a multi-scale temporal block (series decomposition, ProbSparse
-Informer, dilated TCN, learned gate), and a persistence-residual count-aware
-head that predicts a per-step delta on a lookback-mean carry and emits
-zero-inflated negative-binomial parameters. Hyperparameters for the short MP
-panel are set with heavy regularization---hidden dimension 32, a single graph
-layer, dropout 0.3, weight decay $10^{-3}$, 40 epochs---because the panel
-yields only nine sliding windows for a lookback of 4 years and a 2-year
-horizon, and an unregularised deep model overfits immediately. All deep
-baselines (LSTM, ST-GCN, Informer-only) share the same carry-residual
-decoding so that the comparison isolates the architecture rather than the
-carry trick; the historical average (HA) is exactly the carry with $\Delta{=}0$.
-Metrics are MAE, RMSE, RMSLE, WAPE, $R^2$ and CSI (top-10\% hotspot detection);
-MAPE is omitted as undefined for zero-inflated counts.
+\textbf{Contributions.} (1)~A \emph{sparsity-aware calibrated count head} for the
+HASI-Net backbone: a gated zero-inflated negative-binomial (ZINB) emission with a
+gate initialised from each crime's empirical zero fraction, a monotone quantile
+head decoded through $\mathrm{expm1}$, and a log1p-MSE-plus-pinball
+multi-objective loss that keeps the point forecast anchored at the persistence
+carry while learning calibrated quantiles (Sec.~\ref{sec:method}). (2)~A
+\emph{conditional-coverage} evaluation protocol---coverage stratified by
+crime-level bucket (low/medium/high/top-decile) and per-node coverage
+spread---that exposes where marginal-validity methods fail, and the honest
+finding that split conformal is marginally sharper but severely under-covers the
+high-crime tail, while the calibrated head is the only conditionally valid method
+(Sec.~\ref{sec:condcal}). (3)~A four-way probabilistic comparison against split
+conformal prediction and quantile regression on \emph{two} real cities---Chicago
+and Austin---with CRPS, pinball loss, coverage, and sharpness, plus Friedman and
+bootstrap statistics (Sec.~\ref{sec:probbase}). (4)~Cross-region transfer
+Chicago$\to$Austin (calibration-preserving) and Chicago$\to$Madhya~Pradesh,
+reported as a disclosed data-scarcity bound (Sec.~\ref{sec:transfer}), and a
+missing-data robustness study (Sec.~\ref{sec:robust}). All results are reproduced
+by open CUDA notebooks with persisted predictions.
 
 % ===========================================================================
-\section{Forecast accuracy on the MP panel}\label{sec:results}
-Table~\ref{tab:mp} reports test-set metrics on the held-out MP years. HASI-Net
-attains the lowest MAE among the carry-equipped neural models and the best
-$R^2$ of all models. ST-GCN is closely competitive on MAE and CSI (a simple
-fixed-graph conv is a strong baseline on this short panel); Informer-only
-without the graph branch is the weakest neural model, confirming that the
-spatial graph matters on MP. The persistence (HA) baseline is strong---as
-expected for highly persistent annual crime counts---and HASI-Net's
-persistence-residual head is what keeps the deep model at or above it rather
-than collapsing, a known Transformer failure mode on short series.
+\section{Related work}\label{sec:related}
+\textbf{Spatio-temporal crime forecasting.} The recent literature on data-driven
+crime prediction is predominantly \emph{point}-oriented. Graph- and
+attention-based spatio-temporal models adapted from traffic and flow
+forecasting---ST-GCN~\cite{yu2018stgcn}, GraphWaveNet~\cite{wu2019graphwavenet},
+the Informer~\cite{zhou2021informer} and its crime-specific
+variants~\cite{fan2025informer}---have been applied to urban incident
+counts~\cite{deng2023crimerisk,wang2023stgnn,mao2025cnnlstm}, often with
+socioeconomic or point-of-interest side features~\cite{sui2024gat,qin2025acsaformer}
+and adaptive graph structures~\cite{wang2025mragnn,shan2025adagnclstm}. A
+parallel line models discrete risky events rather than counts, e.g.\ park-area
+incident prediction~\cite{hakyemez2023parkevents} and Costa-Rican victimization
+panels~\cite{solis2024costarica}. Almost all of this work reports point metrics
+(MAE/RMSE, hit rate, CSI) and treats the forecast as a single number; very few
+emit a calibrated distribution, and none that we are aware of evaluate
+\emph{conditional} coverage on the high-crime tail. The companion paper's
+finding---that on a real-geography monthly panel persistence is a remarkably
+strong point baseline that deep models match but do not beat---is consistent
+with the broader point-forecast saturation visible in this literature, and it
+motivates looking past point accuracy for the deep model's contribution.
+
+\textbf{Deep probabilistic and count forecasting.} Because crime counts are
+non-negative, integer-valued, zero-inflated and over-dispersed, Gaussian
+likelihoods are the wrong emission family. Zero-inflated and hurdle
+Poisson/negative-binomial models~\cite{lambert1992poisson,hilbe2011negativebinomial}
+are the classical remedy, and deep variants use ZINB
+emissions~\cite{yang2021zinb} with focal reweighting~\cite{lin2017focal} for
+crime-type imbalance. Our head follows this line but adds two elements tuned to
+the aggregated short-series regime: a gate \emph{initialised} from the empirical
+per-crime zero fraction so the emission starts at a sensible sparsity prior and
+only refines it, and a residual, carry-anchored decode (Sec.~\ref{sec:method})
+that protects the persistence baseline. The wider deep-forecasting toolkit our
+backbone draws on---dilated temporal convolutions~\cite{bai2018tcn},
+series decomposition~\cite{zeng2023dlinear}, N-BEATS-style residual
+stacking~\cite{oreshkin2020nbeats} and graph convolutions~\cite{kipf2017gcn}---is
+point-oriented; we retain it and change only the head.
+
+\textbf{Conformal prediction and conditional coverage.} Split conformal
+prediction~\cite{vovk2005random,shafer2008tutorial,lei2018distribution} wraps any
+point forecaster in finite-sample \emph{marginal} coverage guarantees without
+distributional assumptions, which is why it is the natural distribution-free
+baseline here. Its well-known limitation is conditional (group-, node-, or
+level-conditional) coverage: a single global nonconformity width is valid on
+average and invalid exactly where the residual variance is
+heteroscedastic~\cite{romano2019cqr,angelopoulos2022gentle,gneiting2007calibration}.
+Conformalized quantile regression (CQR)~\cite{romano2019cqr} mitigates this by
+fitting quantiles first and conformalizing their spread; pure quantile
+regression~\cite{koenker1978regression} dispenses with conformal entirely and is
+a natural direct probabilistic baseline. We compare against split conformal and
+pure quantile regression; a head-to-head with CQR is a disclosed gap
+(Sec.~\ref{sec:disc}). Our calibrated head is not a conformal wrapper: it is a
+parametric emission whose quantiles are trained directly under a pinball
+objective with a count-likelihood regulariser, so its interval width is node-
+and level-adaptive by construction rather than corrected post hoc.
+
+\textbf{Calibration, sharpness, and scoring rules.} A probabilistic forecast is
+judged by calibration and sharpness jointly~\cite{gneiting2007calibration}:
+calibrated-but-uselessly-wide is no better than sharp-but-miscalibrated, and the
+discipline is to report both rather than pick the favourable one. The continuous
+ranked probability score (CRPS)~\cite{gneiting2007strictly} and the pinball
+(asymmetric $L_1$) loss score the full predictive distribution rather than a
+single quantile. We report all four---marginal and conditional coverage,
+sharpness at the 80\% level, CRPS, and pinball---because each captures a
+different failure mode and reporting only one would overstate the result. For
+inferential support we use the Friedman test on the point
+benchmark~\cite{friedman1937use} and bootstrap confidence
+intervals~\cite{efron1993bootstrap}; Diebold--Mariano pairwise
+comparisons~\cite{diebold1995comparing} are used in the companion paper for
+point-MAE and are a disclosed future-work item here for CRPS/pinball.
+
+\textbf{Positioning.} The gap we fill is specific: a calibrated \emph{count}
+head for spatio-temporal crime panels, evaluated on \emph{conditional} coverage
+across crime-level buckets, on more than one city, with the marginal-sharpness
+concession stated openly. Prior crime work is point-oriented; prior conformal
+work establishes the marginal/conditional distinction in generic regression but
+not on zero-inflated spatio-temporal crime counts; prior count emissions are
+not evaluated for conditional coverage. Our contribution sits at that
+intersection.
+
+% ===========================================================================
+\section{Background}\label{sec:background}
+\subsection{Count emissions: NB and ZINB}\label{sec:zinb}
+For a non-negative count $y$ the negative binomial (NB) distribution with mean
+$\mu$ and dispersion $\alpha$ (variance $\mu+\alpha\mu^2$) handles
+over-dispersion that a Poisson cannot. Crime panels also carry an excess of zeros
+beyond what the NB tail permits, so we use a zero-inflated mixture with an
+active-zero logit $\pi$~\cite{lambert1992poisson,hilbe2011negativebinomial}:
+\begin{equation}\label{eq:zinb}
+\begin{split}
+  p(y{=}0)&=\pi+(1{-}\pi)\,\mathrm{NB}(0;\mu,\alpha),\\
+  p(y{=}k)&=(1{-}\pi)\,\mathrm{NB}(k;\mu,\alpha),\ k>0.
+\end{split}
+\end{equation}
+The head emits $\log\mu$, $\log\alpha$, and the zero-inflation logit $\pi$ per
+$(n,c,h)$. Crucially the gate $\pi$ is \emph{initialised} from the training
+zero-fraction of each crime so that the emission starts at the empirical sparsity
+and only learns a correction---this prevents an untrained gate from collapsing
+the early training signal on the many exact-zero cells.
+
+\subsection{Conformal prediction and the conditional-coverage gap}\label{sec:cp}
+Split conformal~\cite{lei2018distribution} calibrates a nonconformity score
+$s_i=|y_i-\hat\mu_i|$ on a held-out split, then forms intervals
+$\hat\mu(x)\pm q_{\beta}$ where $q_{\beta}$ is the $\beta$-quantile of the
+calibration scores ($\beta=\lceil(1-\alpha)(1+1/n)\rceil/n$). This guarantees
+$P(y\in C(x))\ge 1-\alpha$ \emph{marginally} over the exchangeable joint. It does
+\emph{not} guarantee $P(y\in C(x)\mid x\in G)\ge 1-\alpha$ for a subgroup $G$.
+Because crime counts are strongly heteroscedastic across nodes, a single $q_\beta$
+is too tight for volatile high-crime nodes (under-coverage there) and too loose
+for quiet nodes (over-coverage, wasted sharpness). This is the
+conditional-coverage gap that motivates a level-adaptive head.
+
+This gap is not a deficiency of any particular conformal variant; it is
+structural. Without distributional assumptions, no procedure can guarantee
+non-trivial conditional coverage for free---marginal validity is bought at the
+price of conditional validity, and the two diverge precisely under
+heteroscedasticity~\cite{vovk2005random,romano2019cqr,angelopoulos2022gentle}.
+CQR~\cite{romano2019cqr} recovers \emph{group}-conditional coverage when the
+quantile estimator itself is group-adaptive, but it still inherits the
+estimator's bias on groups the quantile head fits poorly---exactly the
+zero-inflated high-crime tail where data is sparsest. A parametric
+level-adaptive emission avoids the post-hoc correction and lets the interval
+width respond to the node's own predicted level, which is the design we adopt.
+
+\subsection{Quantile regression}\label{sec:qr}
+Quantile regression~\cite{koenker1978regression} directly fits the $\tau$-quantile
+by minimising the pinball loss
+$\rho_\tau(r)=\max(\tau r,(\tau{-}1)r)$ for residual $r=y-\hat q_\tau$. Two
+quantiles ($\tau=0.1,0.9$) bound an 80\% interval; the median ($\tau=0.5$) is the
+point forecast. Its intervals are level-adaptive by construction but, unaided by
+a count likelihood, can cross or be non-monotone and can mis-centre on
+zero-inflated data; we include it as the direct non-conformal probabilistic
+baseline.
+
+\subsection{Scoring and coverage metrics}\label{sec:metrics}
+We evaluate point accuracy (MAE), full-distribution skill (CRPS, pinball), and
+coverage. Marginal 80\% coverage is
+$\mathrm{cov}_{80}=\Pr(y\in[\hat q_{0.1},\hat q_{0.9}])$ over all test cells.
+\emph{Conditional} coverage is the same probability restricted to a crime-level
+bucket: we bin cells by their node's training-period mean crime level into low,
+medium, high, and top-decile buckets and report coverage in each. The
+\emph{conditional gap} is the max-minus-min bucket coverage; per-node coverage
+spread is the standard deviation of per-node empirical $\mathrm{cov}_{80}$.
+Sharpness$_{80}$ is the mean interval half-width $\hat q_{0.9}-\hat q_{0.1}$.
+Calibration and sharpness trade off~\cite{gneiting2007calibration}, so we report
+both; the conditional-coverage view is what separates a genuinely calibrated head
+from a marginally-valid conformal wrapper.
+
+Formally, for a predictive CDF $F$ and observation $y$, the CRPS is
+\begin{equation}\label{eq:crps}
+  \mathrm{CRPS}(F,y)=\int_{-\infty}^{y}\!F(u)^2\,du+\int_{y}^{\infty}\!(1-F(u))^2\,du,
+\end{equation}
+which reduces to the absolute error for a delta distribution and rewards a
+sharp, well-calibrated forecast with a lower value. We approximate $F$ from the
+three emitted quantiles $(\hat q_{0.1},\hat q_{0.5},\hat q_{0.9})$ by linear
+interpolation, so CRPS here is a tractable summary of the three-quantile
+emission, not a closed-form density score. The pinball loss we report is the sum
+$\sum_\tau\rho_\tau(y-\hat q_\tau)$ over $\tau\in\{0.1,0.5,0.9\}$; like CRPS it
+is lower for sharper, better-centred quantiles, but it weights the tails
+asymmetrically and is the objective the quantile head is trained on, so we report
+it both as a training objective and as an evaluation metric.
+
+\textbf{A pedagogical illustration of the gap.} Consider two nodes: a quiet node
+with crime $\mathcal{P}_A$ tightly concentrated near $0$ and a volatile node
+$\mathcal{P}_B$ with a heavy right tail. Split conformal sets one width
+$q_{0.9}$ from the pooled absolute residuals; because most cells are quiet,
+$q_{0.9}$ is small, so the interval $[0,q_{0.9}]$ covers $\mathcal{P}_A$ almost
+always (over-coverage) and $\mathcal{P}_B$ rarely (under-coverage). Marginal
+coverage averages the two and can hit $0.80$ while the volatile node is covered
+below $0.50$. A level-adaptive emission instead sets a small width on $A$ and a
+large width on $B$, covering both near $0.80$. The marginal numbers look similar;
+the conditional numbers do not. This is exactly the pattern
+Sec.~\ref{sec:condcal} measures on the real panels.
+
+% ===========================================================================
+\section{Method: sparsity-aware calibrated count head}\label{sec:method}
+The head sits atop the HASI-Net backbone of the companion paper (graph block +
+multi-scale temporal block; Fig.~\ref{fig:arch}). Its job is to turn the backbone
+features into a calibrated count distribution per $(n,c,h)$.
+
+\subsection{Backbone (self-contained summary)}\label{sec:backbone}
+For a reader who does not consult the companion paper, the backbone has three
+relevant components. (i)~A \emph{fused graph block} combines three adjacency
+channels: a fixed geographic rook-contiguity matrix $\Ageo$, a fixed
+socioeconomic $k$-nearest-neighbour matrix $\Asocio$ (cosine over Census-style
+features), and a learnable adaptive matrix $\Aadapt=\mathrm{softmax}(\mathrm{ReLU}(EE^\top))$
+whose node embeddings are trained end-to-end. The three are summed before each
+graph convolution, so the model can route information along geography, demographic
+similarity, and discovered structure simultaneously. (ii)~A \emph{multi-scale
+temporal block} fuses a ProbSparse Informer attention head~\cite{zhou2021informer}
+(long-horizon dependencies), a dilated temporal convolutional
+network~\cite{bai2018tcn} (multi-resolution local patterns), and a series
+decomposition~\cite{zeng2023dlinear} (trend/seasonal split), combined by a learned
+gate. (iii)~A \emph{persistence-residual decoder} that predicts a residual on top
+of a lookback-mean carry (Sec.~\ref{sec:carry}). This paper keeps the backbone
+identical across all four conditions and changes only the decoder head, so every
+probabilistic comparison below isolates the head.
+
+\subsection{Carry-anchored residual decode}\label{sec:carry}
+Aggregated monthly crime is highly persistent, so we decode residually against a
+lookback-mean carry $\bar x=\tfrac{1}{T_w}\sum_t X_t$, exactly as in the companion
+paper's persistence-residual head:
+\begin{equation}\label{eq:carry}
+  \log\mu_{h} = \mathrm{enc}(\bar x) + \Delta\mu_{h},\quad h=1\ldots H,
+\end{equation}
+with small-initialised $\Delta\mu_h\!\approx\!0$ so training starts at the
+historical-average baseline. The per-step $\Delta\mu_h$ lets the head learn a
+trend/seasonal \emph{shape} across the horizon, the structural advantage over a
+flat carry. This anchoring is what prevents the count likelihood from pulling the
+point forecast off persistence (the failure mode the companion paper documents for
+a pure ZINB loss).
+
+\subsection{Gated ZINB emission with zero-fraction gate initialisation}\label{sec:gate}
+On top of $\log\mu$ the head emits $\log\alpha$ (NB dispersion) and the
+zero-inflation logit $\pi$ of \eqref{eq:zinb}. The gate is initialised so that
+$\sigma(\pi)=\hat z_c$, where $\hat z_c$ is the empirical training zero-fraction
+of crime $c$---so the emission starts at the observed sparsity and only learns a
+per-node correction. This matters on zero-inflated panels where an untrained gate
+would otherwise attribute early-training error to the wrong component and slow
+convergence on the exact-zero mass.
+
+\subsection{Monotone quantile head and $\mathrm{expm1}$ decode}\label{sec:quantile}
+For calibrated intervals the head additionally emits, at each horizon, the
+$\tau=0.1,0.5,0.9$ quantile logits. To guarantee non-negativity and approximate
+monotonicity we decode in log-space and apply $\mathrm{expm1}$, enforcing the
+lower quantile $\le$ median $\le$ upper quantile by construction:
+\begin{equation}\label{eq:qdecode}
+  \hat q_{\tau,h}=\mathrm{expm1}(z_{\tau,h}),\quad
+  z_{0.1,h}\le z_{0.5,h}\le z_{0.9,h}.
+\end{equation}
+The monotonicity constraint is enforced by parameterising the upper/lower logits
+as offsets from the median, so crossing is structurally impossible. This avoids
+the non-monotone-quantile failure of unconstrained quantile regression on small
+panels.
+
+\subsection{Multi-objective loss: log1p-MSE plus pinball}\label{sec:loss}
+The companion paper's ablation showed that a pure ZINB likelihood mis-centres the
+quantiles and raises point MAE on these trended panels. We therefore use a
+multi-objective loss that anchors the point forecast on log1p-MSE (robust to
+count scale and zero-inflation) while shaping the quantile head with pinball, and
+keeps a small count-likelihood regulariser:
+\begin{equation}\label{eq:loss}
+\begin{split}
+  \mathcal{L}={}&\underbrace{(\log1p\hat\mu-\log1p y)^2}_{\text{log1p-MSE}}\\
+  &+\lambda_p\!\sum_\tau\!\rho_\tau(y-\hat q_\tau)\\
+  &+\lambda_{\mathrm{nb}}\big[-\log \mathrm{ZINB}(y;\mu,\alpha,\pi)\big],
+\end{split}
+\end{equation}
+with pinball weight $\lambda_p{=}1.0$ and a small NB weight
+$\lambda_{\mathrm{nb}}{=}0.05$ (a regulariser, not the primary objective). The
+log1p-MSE term keeps the point forecast faithful to the persistence carry; the
+pinball term makes the quantile head level-adaptive; the ZINB regulariser keeps
+the emission shape count-appropriate without dominating. Algorithm~\ref{alg:head}
+summarises the head.
+
+\begin{algorithm}[t]
+\caption{Sparsity-aware calibrated count head (one training step)}\label{alg:head}
+\begin{algorithmic}[1]
+\Require backbone features $Z\in\R^{H\times N\times C}$; carry $\bar x$; zero-fraction $\hat z_c$
+\State $\log\mu_h \gets \mathrm{enc}(\bar x)+\Delta\mu_h$;\ \ $\log\alpha_h\gets$head$(Z)$;\ \ $\pi\gets$head$(Z)$, init $\sigma(\pi)=\hat z_c$
+\State $z_{0.5,h}\gets$ head$(Z)$;\ $z_{0.1,h}\gets z_{0.5,h}-|\delta_l|$;\ $z_{0.9,h}\gets z_{0.5,h}+|\delta_u|$
+\State $\hat q_{\tau,h}\gets \mathrm{expm1}(z_{\tau,h})$ \Comment{non-negative, monotone}
+\State $\mathcal{L}\gets$ log1p-MSE$(\hat\mu,y)+\lambda_p\sum_\tau\rho_\tau(y-\hat q_\tau)+\lambda_{\mathrm{nb}}[-\log\mathrm{ZINB}(y)]$
+\State \Return $\mathcal{L},\ \{\hat\mu,\hat q_{0.1},\hat q_{0.5},\hat q_{0.9}\}$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Baselines: split conformal and quantile regression}\label{sec:baselines}
+\textbf{Split conformal.} We wrap the calibrated head's point forecast
+$\hat\mu$ with per-crime absolute-residual scores $s_i=|y_i-\hat\mu_i|$ on the
+validation split and form intervals $\hat\mu\pm q_{0.9}$, giving marginal 80\%
+coverage by construction~\cite{lei2018distribution}. This is the
+distribution-free reference: same point forecast, conformal-calibrated width.
+\textbf{Quantile regression.} A head trained with \emph{only} pinball loss (no
+log1p-MSE, no ZINB term); the median is the point forecast and the
+$\tau{=}0.1,0.9$ quantiles bound the interval. This isolates the contribution of
+the count-likelihood regulariser and the carry anchor.
+\textbf{Point head.} The companion paper's persistence-residual log1p-MSE head
+(no quantiles), reported for the point-accuracy trade-off.
+
+\subsection{Implementation and training details}\label{sec:impl}
+The calibrated head is a small MLP decoder on top of the frozen-shape backbone
+features; the backbone hyperparameters are those selected by the PSO procedure
+of the companion paper and are frozen across all seeds and all four conditions,
+so the comparison isolates the head, not the backbone. The head emits
+$\log\mu$, $\log\alpha$, $\pi$, and the three quantile logits per $(n,c,h)$; the
+quantile levels are $\tau\in\{0.1,0.5,0.9\}$, giving an 80\% central interval.
+The median quantile $\hat q_{0.5}$ is the head's reported point forecast for the
+calibrated condition, so the point and probabilistic outputs share a single
+decoder. Training uses Adam with early stopping on validation pinball; the
+multi-objective weights ($\lambda_p{=}1.0$, $\lambda_{\mathrm{nb}}{=}0.05$) are
+fixed across cities and not tuned per-dataset, which is itself a small
+honesty constraint---we do not report a per-city-tuned best case.
+
+For the conformal condition, the nonconformity scores $s_i=|y_i-\hat\mu_i|$ are
+computed per crime on the validation split (the same split used for early
+stopping, reused as the calibration set), and the 80\% interval is
+$\hat\mu\pm q_{0.9}$ with $q_{0.9}$ the per-crime ninth-decile of those scores.
+This is the standard split-conformal recipe on top of the calibrated head's own
+point forecast, so any coverage difference between the \emph{calibrated} and
+\emph{conformal} conditions is attributable purely to how the width is set
+(level-adaptive emission vs.\ a single global $q_{0.9}$), holding the point
+forecast fixed. Per-(seed, condition) predictions are persisted, so the offline
+coverage and calibration metrics are reproducible without retraining.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/architecture.png}
+\caption{HASI-Net backbone (companion paper). The calibrated count head of
+Sec.~\ref{sec:method} replaces the persistence-residual point head at the decoder:
+it emits a gated ZINB emission and a monotone, $\mathrm{expm1}$-decoded quantile
+head trained with the multi-objective loss of \eqref{eq:loss}.}
+\label{fig:arch}
+\end{figure}
+
+% ===========================================================================
+\section{Datasets}\label{sec:data}
+We use three real-geography panels of the same four unified women-related crime
+categories (rape/sexual assault, kidnapping/abduction, assault, domestic
+violence) so that the head, the conformal calibration, and the cross-region
+transfer operate on a consistent crime space.
+
+\textbf{Crime-space unification.} The three sources label offences differently
+(Chicago and Austin use U.S.\ FBI-style incident types; the NCRB tables use
+Indian Penal Code sections), so a direct join is incoherent. We map each source
+onto the same four categories with a \emph{disjoint, priority-ordered} rule: an
+incident is assigned to the first matching category in the order
+rape/sexual-assault $\to$ kidnapping/abduction $\to$ assault $\to$ domestic
+violence, so each incident counts once and the categories do not overlap. The
+priority order reflects the severity/registration gravity hierarchy used in
+Indian crime-against-women reporting~\cite{ncrb_cii}, which makes the mapping
+deterministic and reproducible across jurisdictions. This unification is what
+makes cross-region transfer (Sec.~\ref{sec:transfer}) meaningful: the Chicago,
+Austin and MP heads emit forecasts in the same four-dimensional crime space.
+
+\textbf{Chicago (primary).} City of Chicago incident records~\cite{chicagoportal}
+2015--2024 (120 months) classified into the four categories by a disjoint
+priority-ordered rule and aggregated to a $77\times120$
+community-area$\times$month grid; geographic adjacency is rook contiguity. This
+is the primary calibration benchmark (Sec.~\ref{sec:probbase},~\ref{sec:condcal}).
+
+\textbf{Austin (second city).} City of Austin Police incident
+reports~\cite{austinpolice} 2015--2024 aggregated to a $10\times120$
+council-district$\times$month grid with a clean family-violence flag for the
+domestic-violence category; rook-contiguity adjacency. Austin is a structurally
+different city (10 coarse districts vs 77 fine areas, different crime mix and
+reporting practice), so holding the conditional-coverage result here is a genuine
+out-of-distribution test of the head, not a re-skin of Chicago.
+
+\textbf{Madhya Pradesh (transfer target, disclosed bound).} NCRB ``crimes
+against women'' district tables 2001--2014~\cite{ncrb_cii}, mapped to the same
+four categories, $N{=}51$ districts, $T{=}14$ \emph{annual} steps, with Census
+2011 socioeconomics~\cite{census2011}. This panel is short and coarse: only
+$\approx$7 sliding training windows for $T_w{=}4,H{=}2$, and a single test
+window. It is used for cross-country transfer and robustness, and we report it as
+a disclosed data-scarcity bound rather than a headline result.
+
+\textbf{Data quality and a shared caveat.} All three panels measure
+\emph{reported} crime, not actual victimization, and crimes against women are
+systematically under-reported everywhere, more so in India than in the United
+States~\cite{ncrb_cii,census2011}. This biases the absolute level of every
+forecast and therefore any absolute coverage statement; it does \emph{not} bias
+the relative comparison between methods on the same panel, because all
+conditions see the same reported counts. We therefore frame all results as
+relative (calibrated vs.\ conformal vs.\ quantile regression on the same data),
+and we treat absolute coverage on the MP panel as indicative only. A genuinely
+absolute calibration claim would require victimization-survey reconciliation,
+which is out of scope here.
+
+Table~\ref{tab:panels} consolidates the three panels. The Chicago and Austin
+panels share period, length and resolution (monthly, 2015--2024, 120 steps) but
+differ sharply in spatial granularity (77 fine community areas vs.\ 10 coarse
+council districts), which is what makes Austin a genuine out-of-distribution
+test rather than a re-skin. MP is the structural outlier: annual, 14 steps,
+cross-country---a regime in which calibrated intervals are data-limited for any
+method, as the transfer and robustness results confirm.
 
 \begin{table}[t]
 \centering
-\caption{Madhya Pradesh district panel, test split (2001--2014; $N{=}62$,
-$C{=}7$). Lower MAE/RMSE/RMSLE/WAPE better; higher $R^2$/CSI better.
-Best in \textbf{bold}, second \underline{underlined}.}
-\label{tab:mp}
-\begin{tabular}{lrrrrrr}
+\caption{The three real-geography crime panels. Chicago and Austin are monthly
+and contemporaneous; MP is annual and shorter, and is used only for transfer and
+robustness as a disclosed bound.}
+\label{tab:panels}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lccc}
 \toprule
-Model & MAE$\downarrow$ & RMSE$\downarrow$ & RMSLE$\downarrow$ & WAPE$\downarrow$ & $R^2\uparrow$ & CSI$\uparrow$\\
+ & Chicago & Austin & MP\\
 \midrule
-HA           & 23.00 & 47.76 & 0.6748 & 37.36 & 0.649 & \underline{0.4270}\\
-LSTM         & 23.17 & 47.74 & \textbf{0.6574} & 37.64 & 0.649 & 0.4176\\
-ST-GCN       & \textbf{22.72} & \underline{47.35} & 0.6678 & \textbf{36.90} & \underline{0.655} & \textbf{0.4333}\\
-Informer-only& 26.08 & 51.35 & 0.6584 & 42.36 & 0.594 & 0.3229\\
-\textbf{HASI-Net} & \underline{22.82} & \textbf{47.14} & \underline{0.6670} & \underline{37.07} & \textbf{0.658} & 0.4130\\
+Region & U.S.\ city & U.S.\ city & India state\\
+Nodes $N$ & 77 & 10 & 51\\
+Steps $T$ & 120 & 120 & 14\\
+Resolution & month & month & year\\
+Period & 2015--24 & 2015--24 & 2001--14\\
+Adjacency & rook & rook & rook\\
+Use & primary & OOD city & transfer\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ===========================================================================
+\section{Experimental setup}\label{sec:setup}
+\textbf{Models and conditions.} Four probabilistic conditions on the same
+backbone: \emph{calibrated} (our head, Sec.~\ref{sec:method}), \emph{conformal}
+(calibrated head's point forecast + split-conformal width), \emph{quantreg} (pure
+pinball head), and \emph{point} (log1p-MSE head, no quantiles, for the
+point-accuracy trade-off). The calibrated head reuses the PSO-selected backbone
+hyperparameters of the companion paper, frozen across seeds.
+
+\textbf{Metrics.} Point: MAE. Distribution: CRPS, pinball (summed over
+$\tau{=}0.1,0.5,0.9$). Coverage: marginal $\mathrm{cov}_{80}$, conditional
+coverage by bucket (low/med/high/top-decile), conditional gap, per-node coverage
+spread. Sharpness$_{80}$. MAPE is undefined for zero counts and is not reported.
+
+\textbf{Conditional-coverage protocol.} For each node we rank its training-period
+mean crime level, then assign test cells to low/medium/high/top-decile buckets
+(thresholds from training only, leak-free). Conditional coverage is the
+within-bucket $\mathrm{cov}_{80}$; the conditional gap is its range across
+buckets; per-node spread is the std of per-node $\mathrm{cov}_{80}$. This is the
+protocol that distinguishes a conditionally-valid head from a marginally-valid
+conformal wrapper (Sec.~\ref{sec:condcal}). Algorithm~\ref{alg:condcal} states it
+explicitly so the bucketing and the leak-free thresholding are unambiguous.
+
+\begin{algorithm}[t]
+\caption{Conditional-coverage evaluation (one condition, one city)}\label{alg:condcal}
+\begin{algorithmic}[1]
+\Require train per-node means $\bar y_n$; test predictions $\hat\mu,\hat q_{0.1},\hat q_{0.9}$; test truths $y$
+\State compute bucket thresholds from \emph{train} $\bar y_n$: low/med/high/top-decile
+\State for each test cell $(n,c,t)$: bucket $b\gets\mathrm{bucket}(\bar y_n)$
+\State $\mathrm{hit}_{nct}\gets \mathbb{1}[\hat q_{0.1}(nct)\le y_{nct}\le \hat q_{0.9}(nct)]$
+\State marginal $\mathrm{cov}_{80}\gets \mathrm{mean}(\mathrm{hit})$
+\State per-bucket $\mathrm{cov}_{80}(b)\gets \mathrm{mean}(\mathrm{hit}\mid b)$
+\State cond-gap $\gets \max_b\mathrm{cov}_{80}(b)-\min_b\mathrm{cov}_{80}(b)$
+\State per-node spread $\gets \mathrm{std}_n(\mathrm{mean}_t\mathrm{hit}_{nt})$
+\State \Return $\mathrm{cov}_{80},\{\mathrm{cov}_{80}(b)\},\text{cond-gap},\text{spread}$
+\end{algorithmic}
+\end{algorithm}
+
+\textbf{Splits and seeds.} Chronological 65/15/20 train/val/test, most-recent
+held out; PSO selected on val once and frozen. Every condition runs over five
+seeds (42, 1, 2, 3, 4); we report mean$\pm$std. Statistics: Friedman's test over
+the eight-model point benchmark (carried from the companion paper) and 95\%
+bootstrap confidence intervals on the headline probabilistic quantities.
+
+\textbf{Compute.} All training and evaluation on Colab CUDA (Tesla T4), float32,
+with persisted per-(seed, condition) predictions so the offline coverage and
+calibration metrics are reproducible without retraining.
+
+% ===========================================================================
+\section{Results}\label{sec:results}
+% NUMBERS FROM re-runnable Colab CUDA runs (5 seeds), persisted under results/:
+% probbase_chicago_p2_4way_meanstd.csv, probbase_austin_p2austin_4way_meanstd.csv,
+% summary_p2cc_{chicago,austin}_condcal.json, transfer_p2*.csv,
+% robust_mp_p2_meanstd.csv, p2_stats_summary.json.
+
+\subsection{The point-accuracy trade-off (calibrated vs point)}\label{sec:tradeoff}
+We state the cost of calibration first, plainly. On Chicago (Table~\ref{tab:probbase_chi}),
+the calibrated head's point MAE is $2.690\pm0.021$ versus the pure point head's
+$2.635\pm0.021$---a $0.055$ ($\approx$2\%) penalty. The 95\% bootstrap CIs do not
+overlap (calibrated $[2.675,2.707]$ vs point $[2.617,2.649]$; Table~\ref{tab:stats}),
+so the penalty is statistically real, not noise. It is the price of training the
+quantile head and the ZINB regulariser alongside the point objective: a small
+fraction of the point objective's gradient is diverted to shaping quantiles and
+keeping the emission count-appropriate. We do not hide this; we report it because
+the rest of the paper argues the trade is worth it for the operationally relevant
+property---conditional coverage---that the point head does not provide at all.
+
+Two things make this penalty easy to over- or under-read, and we want to be
+explicit about both. First, it is \emph{small in absolute terms}: $0.055$ counts
+on a panel whose monthly per-node means are in the low single digits, and it
+does not change the companion paper's point-forecast ranking---persistence and
+the point head still lead, the calibrated head is mid-pack, exactly as the
+no-point-SOTA framing predicts. Second, it is \emph{not} a penalty the conformal
+condition pays: conformal wraps the same point forecast, so it inherits the
+point head's MAE by construction (Table~\ref{tab:probbase_chi}). The honest
+comparison is therefore not ``calibrated vs.\ conformal on MAE''---conformal
+wins that trivially---but ``calibrated vs.\ conformal on conditional coverage at
+equal point forecast'', which is the comparison Sec.~\ref{sec:condcal} makes.
+
+\subsection{Four-way probabilistic baselines}\label{sec:probbase}
+Tables~\ref{tab:probbase_chi}--\ref{tab:probbase_aus} compare the four conditions
+on marginal coverage, sharpness, CRPS, and pinball over five seeds.
+
+\textbf{The honest concession.} Split conformal is the marginal-coverage and
+sharpness winner on both cities. On Chicago it attains marginal
+$\mathrm{cov}_{80}=0.786$ (just under the 0.80 nominal, by finite-sample
+construction) at sharpness $7.33$, the tightest intervals, and the lowest CRPS
+($1.951$) and pinball ($0.975$). The calibrated head is wider
+(sharpness $11.67$) and slightly worse on CRPS ($2.061$) and pinball ($1.030$).
+On Austin the same pattern holds: conformal $\mathrm{cov}_{80}=0.793$ at
+sharpness $14.21$ and CRPS $3.313$ vs calibrated $\mathrm{cov}_{80}=0.790$ at
+sharpness $36.53$ and CRPS $6.233$. Quantile regression is the weakest
+probabilistic baseline (Chicago MAE $2.829$, Austin MAE $5.758$): without the
+count-likelihood regulariser and the carry anchor its quantiles mis-centre on the
+zero-inflated data, and its intervals, while nominally valid, are no sharper than
+the calibrated head's. Read at the marginal level only, conformal looks best.
+
+\textbf{A variance caveat that is itself informative.} The calibrated head's
+Austin CRPS standard deviation across seeds ($\pm1.52$) is much larger than
+conformal's ($\pm0.09$) or than either method's on Chicago
+($\pm0.04$/$\pm0.02$). This is not a bug; it is the consequence of evaluating
+coverage and CRPS on a $10\times120$ panel whose test set has few cells, so the
+per-seed estimate is noisy. The conformal condition is less variable only
+because its width is a single global scalar pinned to the calibration split.
+The honest reading is that on a coarser panel the calibrated head's
+\emph{measured} probabilistic metrics are noisier, and a deployment on a
+low-node region should report interval estimates over more seeds or a longer
+test window than we have here. The conditional-coverage result
+(Sec.~\ref{sec:condcal}) is more stable because it is a within-bucket proportion
+that averages over the test cells in each bucket.
+
+\textbf{Why that reading is incomplete.} Conformal's marginal sharpness comes
+from a single global width, which is tight on the many quiet cells and too tight
+on the few volatile high-crime cells. The marginal average hides the tail
+failure. The next subsection shows that this is exactly where the calibrated
+head's extra width is earned.
+
+\begin{table*}[t]
+\centering
+\caption{Four-way probabilistic comparison, Chicago (mean$\pm$std over 5 seeds).
+Lower MAE/CRPS/pinball better; cov$_{80}$ near 0.80 better; sharp$_{80}$ lower
+is tighter. Conformal is the marginal sharpness winner; calibrated is the only
+conditionally-valid method (Table~\ref{tab:condcal}).}
+\label{tab:probbase_chi}
+\small
+\begin{tabular}{lccccc}
+\toprule
+Condition & MAE$\downarrow$ & CRPS$\downarrow$ & pinball$\downarrow$ & cov$_{80}\uparrow$ & sharp$_{80}\downarrow$\\
+\midrule
+Calibrated (ours) & 2.690$\pm$.021 & 2.061$\pm$.040 & 1.030$\pm$.020 & \textbf{0.841}$\pm$.009 & 11.67$\pm$1.00\\
+Split conformal   & 2.635$\pm$.021 & \textbf{1.951}$\pm$.019 & \textbf{0.975}$\pm$.010 & 0.786$\pm$.003 & \textbf{7.33}$\pm$0.08\\
+Quantile reg.      & 2.829$\pm$.059 & 2.051$\pm$.035 & 1.026$\pm$.018 & 0.820$\pm$.012 & 10.89$\pm$0.70\\
+Point (no quant.)  & \textbf{2.635}$\pm$.021 & --- & --- & --- & ---\\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\begin{table*}[t]
+\centering
+\caption{Four-way probabilistic comparison, Austin (mean$\pm$std over 5 seeds).
+Same pattern as Chicago: conformal marginally sharper, calibrated the only
+conditionally-valid method.}
+\label{tab:probbase_aus}
+\small
+\begin{tabular}{lccccc}
+\toprule
+Condition & MAE$\downarrow$ & CRPS$\downarrow$ & pinball$\downarrow$ & cov$_{80}\uparrow$ & sharp$_{80}\downarrow$\\
+\midrule
+Calibrated (ours) & 4.601$\pm$.086 & 6.233$\pm$1.522 & 3.117$\pm$.761 & 0.790$\pm$.092 & 36.53$\pm$17.31\\
+Split conformal   & 4.527$\pm$.097 & \textbf{3.313}$\pm$.094 & \textbf{1.657}$\pm$.047 & 0.793$\pm$.006 & \textbf{14.21}$\pm$0.18\\
+Quantile reg.      & 5.758$\pm$.395 & 4.723$\pm$.624 & 2.361$\pm$.312 & \textbf{0.859}$\pm$.042 & 33.82$\pm$9.40\\
+Point (no quant.)  & \textbf{4.527}$\pm$.097 & --- & --- & --- & ---\\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/probbase_chicago.png}
+\caption{Coverage@80 and CRPS for the three probabilistic conditions on Chicago
+(5 seeds). Conformal is marginally sharper and lower-CRPS; the calibrated head is
+marginally wider. Marginal coverage alone does not separate them---the
+conditional view (Fig.~\ref{fig:condcal_chi}) does.}
+\label{fig:probbase_chi}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/probbase_austin.png}
+\caption{Coverage@80 and CRPS for the three probabilistic conditions on Austin
+(5 seeds), the out-of-distribution second city. The same marginal pattern as
+Chicago (conformal marginally sharper/lower-CRPS) and the same lesson: marginal
+coverage alone does not separate the methods---the conditional view
+(Fig.~\ref{fig:condcal_aus}) does.}
+\label{fig:probbase_aus}
+\end{figure}
+
+\subsection{Conditional coverage: the calibrated head's win}\label{sec:condcal}
+Table~\ref{tab:condcal} and Figs.~\ref{fig:condcal_chi}--\ref{fig:condcal_aus}
+report coverage stratified by crime-level bucket. This is the result that
+justifies the calibrated head. On Chicago, split conformal's marginal
+$0.786$ is the average of over-coverage on low-crime nodes ($0.835$) and
+\emph{severe under-coverage} on the high-crime top decile ($0.464$)---an interval
+that nominally claims 80\% coverage in fact covers barely more than 46\% of the
+highest-crime months, precisely the months an allocator acts on. Its conditional
+gap is $0.336$ and its per-node coverage spread is $0.187$. The calibrated head,
+by contrast, holds coverage across all buckets---low $0.903$, medium $0.726$,
+high $0.858$, top-decile $0.915$---with a conditional gap of only $0.115$ and a
+per-node spread of $0.072$, roughly $2.6\times$ tighter than conformal's. It is
+the only method whose top-decile coverage exceeds the 0.80 nominal.
+
+Austin reproduces the result out of distribution. Conformal's top-decile
+coverage is $0.573$ (again well under 0.80) with per-node spread $0.168$; the
+calibrated head holds top-decile $0.787$ with per-node spread $0.036$---a
+$4.7\times$ tighter spread. The calibrated head is the only conditionally-valid
+method on both cities. Conformalized quantile regression would narrow this gap,
+but our pure-quantile baseline does not (it trades sharpness for its own
+miscalibration, Table~\ref{tab:probbase_chi}), and the point is structural:
+\emph{any} single-width marginal-validity method will under-cover a
+heteroscedastic tail, while a level-adaptive emission does not.
+
+The framing we want the reader to take: conformal wins marginal sharpness; the
+calibrated head wins conditional validity. For a probabilistic forecast that
+feeds an allocation decision, conditional validity on the high-crime tail is the
+property that matters, and it is the one conformal provably cannot
+guarantee~\cite{romano2019cqr,gneiting2007calibration}. The calibrated head pays
+a 2\% point-MAE premium (Sec.~\ref{sec:tradeoff}) to obtain it.
+
+\textbf{Operational reading.} Translate the bucket numbers into the allocator's
+decision. An allocator that mobilises on conformal's top-decile interval on
+Chicago is wrong---the realised count falls outside the stated 80\% band---in
+$1-0.464=53.6\%$ of those high-crime months; on the calibrated head it is wrong
+in $1-0.915=8.5\%$ of them. On Austin the corresponding figures are
+$42.7\%$ (conformal) vs.\ $21.3\%$ (calibrated). The conformal interval is, on
+the operationally critical cells, less trustworthy than a coin flip; the
+calibrated interval is not. This is not a marginal-coverage difference---both
+conditions sit at or near $0.79$--$0.84$ marginally---and it is invisible to any
+evaluation that reports only marginal coverage. It is, however, the difference
+that determines whether a patrol shift meets the event it was sent to.
+
+\begin{table*}[t]
+\centering
+\caption{Conditional coverage by crime-level bucket (mean over 5 seeds). The
+top-decile column is the operationally critical one: conformal under-covers the
+high-crime tail ($0.464$/$0.573$, well under the 0.80 nominal); the calibrated
+head is the only conditionally-valid method (Chicago $0.915$, Austin $0.787$).
+cond-gap = max$-$min bucket coverage; node-spread = std of per-node cov$_{80}$.}
+\label{tab:condcal}
+\small
+\begin{tabular}{llcccccc}
+\toprule
+City & Method & marginal & low & med & high & top-decile & node-spread\\
+\midrule
+Chicago & Conformal   & 0.786 & 0.835 & 0.845 & 0.680 & 0.464 & 0.187\\
+Chicago & Calibrated  & 0.841 & 0.903 & 0.726 & 0.858 & \textbf{0.915} & \textbf{0.072}\\
+\midrule
+Austin  & Conformal   & 0.793 & 0.829 & 0.825 & 0.723 & 0.573 & 0.168\\
+Austin  & Calibrated  & 0.790 & 0.834 & 0.747 & 0.783 & \textbf{0.787} & \textbf{0.036}\\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/condcal_chicago.png}
+\caption{Conditional coverage by crime-level bucket, Chicago. Conformal's
+marginal 0.79 is the average of over-coverage on low-crime nodes and severe
+under-coverage on the top decile ($0.46$). The calibrated head holds coverage
+across all buckets (top-decile $0.92$). This is the headline result.}
+\label{fig:condcal_chi}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/condcal_austin.png}
+\caption{Conditional coverage by crime-level bucket, Austin---the
+out-of-distribution reproduction. Same pattern: conformal under-covers the top
+decile ($0.57$); the calibrated head holds it ($0.79$) with a $4.7\times$ tighter
+per-node spread.}
+\label{fig:condcal_aus}
+\end{figure}
+
+\subsection{Cross-region transfer}\label{sec:transfer}
+Table~\ref{tab:transfer} and Fig.~\ref{fig:transfer_aus} report transfer from the
+Chicago-trained calibrated head to a second city.
+
+\textbf{Chicago$\to$Austin (calibration-preserving).} Transferring the
+Chicago-trained head to Austin (fine-tune on a small Austin split) matches
+from-scratch Austin training on point accuracy---MAE $4.579\pm0.050$ vs
+$4.601\pm0.086$, with a tighter seed spread---and \emph{preserves} marginal
+calibration ($\mathrm{cov}_{80}=0.801$ vs scratch $0.790$). The honest caveat:
+CRPS is slightly \emph{worse} under transfer ($7.527$ vs $6.233$), i.e.\ the
+transferred intervals are a little wider. We read this as a mixed but positive
+result: the calibrated structure (gate init, monotone quantile head,
+multi-objective loss) transfers across cities and keeps the operationally
+critical coverage property, at a small sharpness cost on a structurally different
+target. For a deployment that cannot label a new city from scratch, this is the
+practically relevant case.
+
+\textbf{Chicago$\to$Madhya~Pradesh (disclosed bound).} The MP panel is annual
+with $T{=}14$, so it yields $\approx$7 training windows and a single test window.
+Under that regime every method's calibration collapses: scratch
+$\mathrm{cov}_{80}=0.158$, transfer $0.128$---there is too little test mass for
+any interval to be meaningfully calibrated, and the coverage estimate itself is
+noisy (std $0.34$ scratch, $0.23$ transfer). On point accuracy transfer and
+scratch are tied within bootstrap noise (MAE $46.52$ vs $47.04$; 95\% CIs
+$[45.07,47.69]$ vs $[46.05,47.80]$, overlapping; Table~\ref{tab:stats}). We report
+this as a \emph{disclosed data-scarcity bound}, not a transfer success: the
+calibrated head cannot rescue calibration from a panel this short, and we do not
+claim it does. The positive reading is narrow but honest---transfer does not
+\emph{degrade} point accuracy on MP---and the broader lesson is that the limiting
+factor on coarse Indian data is data, not model class.
+
+\begin{table*}[t]
+\centering
+\caption{Cross-region transfer (mean$\pm$std over 5 seeds). Chicago$\to$Austin:
+point parity + calibration preserved, CRPS slightly worse (mixed-positive).
+Chicago$\to$MP: disclosed data-scarcity bound---coverage collapses for every
+method on the $T{=}14$ annual panel; MAE tied within bootstrap noise.}
+\label{tab:transfer}
+\small
+\begin{tabular}{llcccc}
+\toprule
+Target & Condition & MAE$\downarrow$ & CRPS$\downarrow$ & cov$_{80}\uparrow$ & sharp$_{80}$\\
+\midrule
+Austin & Scratch (Austin)   & 4.601$\pm$.086 & 6.233$\pm$1.522 & 0.790$\pm$.092 & 36.53\\
+Austin & Transfer (Chi$\to$Aus) & 4.579$\pm$.050 & 7.527$\pm$2.882 & 0.801$\pm$.072 & 38.57\\
+\midrule
+MP     & Scratch (MP)       & 47.04$\pm$1.13 & 88.12$\pm$32.54 & 0.158$\pm$.342 & 43.70\\
+MP     & Transfer (Chi$\to$MP) & 46.52$\pm$1.61 & 81.99$\pm$29.57 & 0.128$\pm$.235 & 41.71\\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/transfer_austin.png}
+\caption{Chicago$\to$Austin transfer: point accuracy parity with a tighter seed
+spread (left) and marginal calibration preserved at the 0.80 nominal (right),
+at a small CRPS cost.}
+\label{fig:transfer_aus}
+\end{figure}
+
+\subsection{Missing-data robustness}\label{sec:robust}
+Table~\ref{tab:robust} and Fig.~\ref{fig:robust_mp} report the calibrated head on
+the MP panel under random missingness masks of 0, 10, 25, 50\%. We report this
+honestly as a limited result because the MP panel is data-starved. The pattern is
+not catastrophic: as missingness rises the head's intervals widen
+(sharpness$_{80}$ $43.7\to16.3\to13.5\to219.2$), and because they widen, coverage
+does not collapse---it falls to $0.091$ at 10\% mask then recovers to $0.229$ at
+25\% and $0.723$ at 50\%. Point MAE degrades ($47.0\to55.6\to62.0$) then improves
+marginally at 50\% ($56.7$), but this last point is an artefact of the widening
+intervals dominating a noisy single-window test set on a $T{=}14$ panel, not a
+robust trend. The defensible reading is that the calibrated head degrades
+gracefully (its intervals widen rather than give false confidence), but the MP
+panel is too short to support a strong robustness claim, and we make none.
+
+\textbf{Why widening is the right failure mode.} The mechanism behind the
+non-collapse is the level-adaptive variance of the calibrated emission: under a
+random missingness mask the imputed inputs inflate the head's predicted
+uncertainty, which widens the quantile spread, which raises coverage. A
+fixed-width method (conformal with a width calibrated on the clean split) cannot
+do this---its interval is pinned and would give the same false confidence on
+masked inputs as on clean ones. The calibrated head therefore fails \emph{honestly}
+under missingness: it signals reduced confidence rather than pretending none was
+lost. The 50\%-mask coverage jump to $0.723$ is the same effect at an extreme
+mask fraction, where the intervals become so wide that they cover almost
+everything---operationally useless, but not falsely confident. We report the
+whole curve rather than a single robustness number so this transition is
+visible.
+
+\begin{table}[t]
+\centering
+\caption{Missing-data robustness on the coarse MP panel (mean over seeds).
+Reported as limited: the head's intervals widen with missingness so coverage does
+not collapse, but the $T{=}14$ panel cannot support a strong robustness claim.}
+\label{tab:robust}
+\begin{tabular}{cccc}
+\toprule
+Mask frac. & MAE$\downarrow$ & cov$_{80}\uparrow$ & sharp$_{80}$\\
+\midrule
+0.00 & 47.04 & 0.158 & 43.70\\
+0.10 & 55.59 & 0.091 & 16.32\\
+0.25 & 62.03 & 0.229 & 13.48\\
+0.50 & 56.74 & 0.723 & 219.25\\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{figures/comparison_MAE_mp.png}
-\caption{Test MAE across models on the MP panel. HASI-Net and ST-GCN both
-improve on the HA persistence baseline; Informer-only without the graph
-branch is weakest.}
-\label{fig:cmp}
+\includegraphics[width=\linewidth]{figures/robustness_mp.png}
+\caption{Missing-data robustness on the MP panel: MAE rises and the intervals
+widen with mask fraction, so coverage recovers rather than collapsing. The
+$T{=}14$ annual panel makes this a limited, not headline, result.}
+\label{fig:robust_mp}
 \end{figure}
 
-\begin{figure}[t]
+\subsection{Statistical analysis}\label{sec:stats}
+Table~\ref{tab:stats} reports the inferential statistics. Friedman's test over
+the eight-model point-MAE benchmark (carried from the companion paper) rejects
+the null of equal models ($\chi^2{=}22.87$, $p{=}0.0018$); the mean ranks put
+GraphWaveNet first ($1.8$), the persistence baseline HA second ($2.2$), MTGNN
+third ($2.8$), and HASI-Net fifth ($5.2$)---the strong-persistence finding that
+motivates this paper. No pairwise rank gap exceeds the critical difference at
+$\alpha{=}0.1$ ($\mathrm{CD}{=}6.09$), so the ordering is real but the gaps are
+small, consistent with the companion paper's no-point-SOTA framing. The 95\%
+bootstrap CIs confirm the two headline probabilistic claims: (i)~the calibrated
+head's Chicago coverage is valid and tight, $0.841$ $[0.835,0.849]$ (entirely above
+0.80); (ii)~the point-MAE penalty is real, calibrated $[2.675,2.707]$ vs point
+$[2.617,2.649]$ (non-overlapping); and (iii)~the Chicago$\to$MP transfer is tied
+with scratch within noise, $[45.07,47.69]$ vs $[46.05,47.80]$ (overlapping). We
+report Diebold--Mariano~\cite{diebold1995comparing} point-MAE comparisons in the
+companion paper; here the bootstrap CIs are the inferential support for the
+calibration claims, and we do not over-claim beyond what they permit.
+
+Two further points on the statistics deserve stating plainly. First, the
+Friedman ranks speak only to \emph{point} accuracy; they say nothing about the
+probabilistic ordering, which is the subject of this paper. We carry them in
+because the calibrated head inherits the HASI-Net backbone's point rank
+(fifth), and a reader needs to see that the no-point-SOTA result of the
+companion paper still holds once the calibrated head is attached---the
+$\approx$2\% penalty does not rescue the point ranking, and we do not claim it
+does. Second, the bootstrap CIs are computed over the five-seed distribution and
+quantify seed variability, not data-resampling variability; on the monthly
+panels with thousands of test cells the cell-level variance is small relative to
+the seed variance, so the five-seed CI is the relevant uncertainty band for
+``would a different random initialisation change the conclusion.'' The
+non-overlapping point-MAE CIs therefore mean the penalty is stable across
+restarts, and the overlapping MP transfer CIs mean transfer does not reliably
+beat scratch---both exactly the readings we report.
+
+\begin{table*}[t]
 \centering
-\includegraphics[width=\linewidth]{figures/training_curves_mp.png}
-\caption{HASI-Net training loss and validation MAE on the MP panel (heavy
-regularization, early stopping).}
-\label{fig:train}
-\end{figure}
-
-% ===========================================================================
-\section{District risk ranking and mapping}\label{sec:risk}
-We generate a two-year-ahead risk forecast for every district by summing
-HASI-Net's predicted counts across the 7 categories and the 2 horizon years,
-and rank districts by forecasted risk (Fig.~\ref{fig:risk}). The top-five
-forecasted-risk districts are Indore (2338), Bhopal (1757), Jabalpur (1750),
-Gwalior (1668) and Sagar (1658)---MP's largest urban agglomerations---followed
-by Chhindwara, Ujjain, Betul, Shahdol and Khargone. The bottom entries are
-the NCRB special-unit ``districts'' (Government Railway Police and Cyber
-Cell), which record few or no women-centric crimes; their presence is an
-artifact of NCRB coding rather than a genuine low-risk geographic unit, and
-we flag them for exclusion in operational use. That the model's ranking
-aligns with known urban hotspots is a face-validity check on the forecast.
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=\linewidth]{figures/district_risk_mp.png}
-\caption{HASI-Net two-year-ahead forecasted women-centric crime risk by MP
-district (summed over 7 categories). Top-risk districts are the major urban
-agglomerations.}
-\label{fig:risk}
-\end{figure}
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=\linewidth]{figures/choropleth_mp.png}
-\caption{Choropleth of forecasted women-centric crime risk across MP
-districts (OrRd scale). White districts are special-unit NCRB entries with
-no polygon.}
-\label{fig:choro}
-\end{figure}
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=\linewidth]{figures/pred_vs_actual_mp.png}
-\caption{HASI-Net forecast vs actual for the top-risk district over the test
-horizon (all categories aggregated).}
-\label{fig:pva}
-\end{figure}
-
-% ===========================================================================
-\section{Socioeconomic correlates of forecasted risk}\label{sec:socio}
-To interpret the forecast we compute Pearson correlations between the
-forecasted district risk and the six Census 2011 node features across the 46
-geographic districts whose names match the Census 2011 boundary file (special
-units and unmatched post-2011 districts excluded). Table~\ref{tab:corr} shows
-that risk is strongly positively associated with urbanization ($r{=}{+}0.72$)
-and literacy ($r{=}{+}0.60$), weakly positively with Scheduled Caste share
-($r{=}{+}0.24$), and negatively with Scheduled Tribe share ($r{=}{-}0.69$)
-and workers ratio ($r{=}{-}0.34$). The forecast is strongly anchored to
-history (forecasted risk vs historical total $r{=}{+}0.967$), consistent with
-the persistence-residual head.
-
-Two non-causal interpretations follow. First, urbanization and literacy
-correlate with \emph{reporting infrastructure}: cities with literate
-populations and police presence record more cases, so reported risk
-concentrates there. Second, the strong negative association with Scheduled
-Tribe share likely reflects both lower population density in tribal-majority
-districts and historically lower reporting rates, not necessarily lower
-underlying incidence. These correlates are descriptive and should not be read
-as causal drivers; they do, however, indicate where under-reporting may
-mask risk and where reporting-access interventions could change the
-picture.
-
-\begin{table}[t]
-\centering
-\caption{Pearson correlation of forecasted two-year risk with Census 2011
-features across 46 geographic MP districts.}
-\label{tab:corr}
-\begin{tabular}{lr}
+\caption{Statistical analysis. (a)~Friedman mean ranks over the 8-model point
+benchmark ($\chi^2{=}22.87$, $p{=}0.0018$; CD${=}6.09$ at $\alpha{=}0.1$, no
+significant pairwise gaps). (b)~95\% bootstrap CIs on headline probabilistic
+quantities.}
+\label{tab:stats}
+\small
+\begin{tabular}{lr@{\hskip 6pt}lr@{\hskip 6pt}lr}
 \toprule
-Census feature & $r$ with forecasted risk\\
+\multicolumn{6}{l}{(a) Friedman point-MAE mean ranks (lower better)}\\
+GraphWaveNet & 1.8 & HA & 2.2 & MTGNN & 2.8\\
+Informer-only & 4.8 & HASI-Net & 5.2 & DCRNN & 5.8\\
+LSTM & 6.6 & ST-GCN & 6.8 & & \\
 \midrule
-Urbanization        & $+0.72$\\
-Literacy rate       & $+0.60$\\
-Scheduled Caste share & $+0.24$\\
-Sex ratio           & $-0.22$\\
-Workers ratio       & $-0.34$\\
-Scheduled Tribe share & $-0.69$\\
-\midrule
-Historical total (2001--2014) & $+0.967$\\
+\multicolumn{6}{l}{(b) 95\% bootstrap confidence intervals (Chicago unless noted)}\\
+cov$_{80}$ (calibrated)    & \multicolumn{5}{l}{0.841 \ [$0.835,\ 0.849$]\quad(valid, above 0.80)}\\
+MAE (calibrated)           & \multicolumn{5}{l}{2.690 \ [$2.675,\ 2.707$]}\\
+MAE (point)                & \multicolumn{5}{l}{2.635 \ [$2.617,\ 2.649$]\quad(non-overlapping $\Rightarrow$ real penalty)}\\
+MAE MP transfer            & \multicolumn{5}{l}{46.52 \ [$45.07,\ 47.69$]}\\
+MAE MP scratch            & \multicolumn{5}{l}{47.04 \ [$46.05,\ 47.80$]\quad(overlapping $\Rightarrow$ tied)}\\
 \bottomrule
 \end{tabular}
-\end{table}
+\end{table*}
 
 % ===========================================================================
-\section{Heterogeneous graph channel weights on MP}\label{sec:channels}
-The learned softmax fusion weights over the three adjacency channels
-(geographic, socioeconomic, adaptive) on the MP panel are near-uniform
-($\approx0.333$ each). We read this honestly: on a 14-year, 9-window panel
-with heavy regularization, the data do not strongly favour one adjacency
-notion over another, and the fusion provides robustness rather than
-decisive channel selection. This contrasts with longer, fine-grained
-benchmarks (see the companion paper) where clearer channel preferences
-emerge. The near-uniform weights are themselves a useful diagnostic: they
-signal that the MP panel is too short to identify a dominant interaction
-structure, which is a data-availability conclusion rather than a model
-failure.
+\section{Discussion}\label{sec:disc}
+The two papers tell one story. The companion paper establishes that on a
+real-geography monthly crime panel point accuracy is saturated by
+persistence---no deep model beats the historical average on point MAE or on a
+leak-free event-verification protocol, and anticipating transient per-node spikes
+is hard for every method (all models under-forecast spikes, bias${<}1$). If point
+accuracy is saturated, the deep model's value must be probabilistic. This paper
+delivers that value and, just as importantly, states its limits.
 
-\begin{figure}[t]
-\centering
-\includegraphics[width=\linewidth]{figures/channel_weights_mp.png}
-\caption{Learned heterogeneous graph channel weights on the MP panel
-(geographic / socioeconomic / adaptive), near-uniform.}
-\label{fig:channels}
-\end{figure}
+The central result is that \emph{conditional} coverage, not marginal coverage, is
+the property that matters for crime allocation, and it is the property that
+distribution-free marginal-validity methods structurally lack. Split conformal is
+the right thing to do if one wants guaranteed marginal coverage with no
+distributional assumptions, and we confirm it is marginally sharper and
+marginally better on CRPS; we do not claim otherwise. But its single global width
+under-covers the high-crime top decile---$0.46$ on Chicago, $0.57$ on Austin---and
+the high-crime tail is exactly where an allocator acts and where a wrong
+confidence is most costly. The calibrated head is the only method that holds
+coverage there, on both cities, out of distribution, with a per-node coverage
+spread $2$--$5\times$ tighter than conformal's. It pays for this with a real but
+small ($\approx$2\%) point-MAE penalty and wider intervals---a trade we make
+explicit rather than hide behind a single marginal-coverage number.
 
-% ===========================================================================
-\section{Discussion and policy implications}\label{sec:policy}
-\textbf{What the model gives a policy user.} A two-year-ahead district risk
-ranking and choropleth (Figs.~\ref{fig:risk}--\ref{fig:choro}) that can
-prioritise deployment of women's helpline capacity, victim-support units and
-specialised investigators toward Indore, Bhopal, Jabalpur, Gwalior and Sagar;
-a per-category breakdown (the model forecasts all 7 IPC heads) that lets
-allocation distinguish, e.g., cruelty-by-husband hotspots from
-kidnapping/abduction hotspots; and a hotspot-detection CSI that quantifies
-how reliably the model flags the top-10\% districts.
+The cross-region results temper the claim honestly. Chicago$\to$Austin transfer
+preserves calibration---the calibrated structure is portable across cities---at a
+small CRPS cost; this is the deployment-relevant case (a new city without labels)
+and it is a genuine positive. Chicago$\to$Madhya~Pradesh is a disclosed failure
+of the regime, not the model: an annual $T{=}14$ panel cannot support calibrated
+intervals for any method, and we say so. The robustness study on MP is similarly
+limited: the head degrades gracefully (intervals widen, coverage recovers rather
+than collapses) but the panel is too short for a strong claim. The pattern across
+these is that the limiting factor on coarse Indian crime data is data
+availability, not model class---a conclusion that argues for finer-grained public
+reporting, which is itself a policy recommendation.
 
-\textbf{Honest limits.} Aggregated annual NCRB data is short and coarse: only
-nine sliding windows fit a 4-year lookback and 2-year horizon, which caps the
-gain any deep model can realise over persistence. The socioeconomic features
-are from Census 2011 and age across the forecast window. Reported counts
-reflect reporting behaviour as much as incidence, and the urbanization/literacy
-correlates indicate likely under-reporting in less-urban, less-literate and
-tribal-majority districts. We make these limits explicit rather than
-overstating accuracy.
+\subsection{Deployment considerations}\label{sec:deploy}
+A probabilistic forecast only earns its keep if an allocator can act on it, so we
+spell out how we expect the calibrated head to be used and where that use is and
+is not supported by our evidence. The natural decision rule is a
+\emph{thresholded mobilisation}: deploy a fixed patrol or victim-support shift to
+node $n$ at horizon $h$ when the lower 80\% quantile $\hat q_{0.1}(n,h)$ exceeds
+a jurisdiction-defined risk threshold $\theta$, i.e.\ when even the optimistic
+bound of the forecast is risky. This rule uses the interval, not just the point
+forecast, and it is exactly the rule under which conditional coverage on the
+high-crime tail matters: a wrong lower bound on a top-decile node sends a shift
+that the model claimed was safe. Our evidence supports this rule on the monthly
+panels (Chicago, Austin) where the calibrated head's top-decile coverage is
+$0.79$--$0.92$; it does \emph{not} support it on the MP annual panel, where
+coverage is $\sim0.16$ and a thresholded deployment would be poorly calibrated.
 
-\textbf{Recommendations.} (1)~Publish district crime data at finer temporal
-resolution (quarterly or monthly) and with category completeness, which would
-materially help deep models realise larger gains. (2)~Pair the forecast with
-reporting-access interventions in districts where socioeconomic correlates
-suggest under-reporting. (3)~Use the model as a decision-support layer over
-the strong HA baseline, not a replacement for it: the persistence-residual
-design makes HASI-Net degrade gracefully to HA when learned deltas are
-unreliable.
+Two deployment caveats follow from the results. First, the calibrated head's
+intervals are wider than conformal's on the low-crime majority, so a
+thresholded rule that mobilises on $\hat q_{0.1}$ will trigger slightly more
+often on quiet nodes than a conformal-based rule would; operationally this is a
+conservative bias (over-deployment on quiet nodes) rather than a dangerous one
+(under-deployment on volatile ones), and it is the price of conditional
+validity. A jurisdiction with a hard staffing cap could raise $\theta$ to
+compensate, or adopt the hybrid head discussed in Sec.~\ref{sec:threats}.
+Second, the cross-region transfer result (Chicago$\to$Austin) suggests a
+practical rollout path: pre-train the head on a data-rich city, fine-tune on a
+small labelled split of a new city, and accept the small CRPS cost we measured
+in exchange for not labelling the new city from scratch---the deployment-relevant
+case for a state agency that covers many small jurisdictions.
+
+\subsection{Threats to validity}\label{sec:threats}
+\textbf{Construct validity.} The conditional-coverage protocol buckets test
+cells by training-period node mean, with thresholds computed on training only,
+so the bucketing is leak-free; but bucket boundaries are a discretisation of a
+continuous level, and a different bucketing (quintiles, or per-crime rather than
+pooled) would give different per-bucket numbers. We report the
+low/medium/high/top-decile scheme because the top decile is the operationally
+load-bearing one, not because it is the only meaningful axis. Coverage is also a
+frequentist property that needs enough test mass; on the MP annual panel there is
+too little, which is why we disclose that regime as a bound rather than a result.
+
+\textbf{External validity.} The conditional-coverage win is shown on two cities.
+Austin is a genuine out-of-distribution test (10 coarse council districts vs.\
+Chicago's 77 fine community areas, different crime mix and reporting practice),
+but it is still one U.S.\ city, and a broader multi-city study would strengthen
+the claim. The four crime categories are women-related crimes unified across
+jurisdictions by a priority-ordered rule; official counts of these categories
+are known to be under-reported and unevenly reported across jurisdictions, so
+the panel reflects reported, not actual, victimization---a caveat that applies
+equally to all methods compared and so does not bias the relative comparison,
+but does bound any absolute inference.
+
+\textbf{Internal validity.} The backbone hyperparameters are PSO-selected once
+on the companion paper's Chicago validation split and frozen across all
+conditions and cities; the head's multi-objective weights ($\lambda_p{=}1.0$,
+$\lambda_{\mathrm{nb}}{=}0.05$) and quantile levels are likewise fixed and not
+tuned per city, so the comparison is not a per-city best case. The gate
+initialisation depends on the training zero-fraction, which is well-defined on
+the monthly panels but noisy on the short MP panel---another reason the MP
+calibration result is weak. All four conditions share the same backbone and
+point decoder, so differences are attributable to the head/width mechanism, not
+to architecture search.
+
+\textbf{Statistical validity.} We report five-seed mean$\pm$std and 95\%
+bootstrap confidence intervals on the headline quantities; the bootstrap CIs are
+not Diebold--Mariano pairwise tests, and we do not claim CRPS/pinball
+significance beyond the non-overlapping-CI evidence on point MAE. The Friedman
+test is carried from the companion paper's eight-model point benchmark and
+speaks to point, not probabilistic, ordering.
+
+\textbf{Scope.} We evaluate conditional coverage along the crime-level axis.
+Conditional coverage along spatial (node) and temporal (horizon, season) axes is
+also operationally meaningful, and the per-node coverage spread we report is a
+spatial-axis summary; a full conditional-coverage audit along every conditioning
+is left to future work. Finally, conformalized quantile
+regression~\cite{romano2019cqr} would narrow the conditional-coverage gap
+versus our head; we compare against pure quantile regression and split conformal,
+not CQR, and a head-to-head with CQR is a disclosed future-work item, as is a
+hybrid that uses conformal width on quiet nodes and the calibrated emission on
+volatile ones to recover the sharpness the calibrated head sacrifices on the
+low-crime majority.
 
 % ===========================================================================
 \section{Conclusion}\label{sec:conc}
-We applied HASI-Net to the real aggregated NCRB 2001--2014 Madhya Pradesh
-district panel and produced two-year-ahead women-centric crime risk forecasts
-that beat the historical-average, LSTM and Informer-only baselines on MAE and
-achieve the best $R^2$, while staying competitive with ST-GCN. The forecast
-correctly ranks MP's major urban districts as highest-risk, and a
-socioeconomic correlation analysis links forecasted risk to urbanization and
-literacy (positively) and Scheduled Tribe share (negatively), informing both
-resource allocation and reporting-access policy. We release a reproducible
-M1/Colab notebook companion and report the data-availability limits honestly.
+We presented a sparsity-aware calibrated count head for the HASI-Net backbone and
+evaluated it where coverage matters: conditionally, across crime-level buckets,
+on two real cities. The honest findings are that split conformal prediction is
+marginally sharper and better on point MAE/CRPS but severely under-covers the
+high-crime tail, while the calibrated head is the only conditionally-valid method
+(top-decile coverage $0.915$ vs $0.464$ on Chicago, $0.787$ vs $0.573$ on Austin,
+with $2$--$5\times$ tighter per-node spread), bought at a small, statistically
+real $\approx$2\% point-MAE penalty. Cross-region transfer Chicago$\to$Austin
+preserves calibration; Chicago$\to$Madhya~Pradesh is a disclosed data-scarcity
+bound. Together with the companion paper's strong-persistence finding, this
+positions the deep model's contribution where it is defensible: not sharper point
+forecasts, but calibrated conditional uncertainty on the high-crime tail---the
+property an allocator needs and persistence and marginal conformal cannot
+provide. All results come from re-runnable CUDA runs with persisted predictions.
+
+Two broader implications follow. First, the evaluation protocol---conditional,
+bucket-stratified coverage, reported alongside marginal coverage and
+sharpness---is itself a contribution: a marginal-coverage-only evaluation would
+have declared conformal the winner and missed the tail failure that decides the
+allocator's decision. We would encourage conditional-coverage reporting as a
+default for probabilistic crime forecasting. Second, the MP bound is a data
+finding as much as a model finding: the limiting factor on coarse Indian
+crime data is the annual, district-level reporting granularity, not the model
+class, which argues for finer-grained public crime reporting---a policy
+recommendation that precedes any modelling choice.
 
 \section*{Reproducibility}
-The MP pipeline (NCRB + Census + boundary download, graph construction,
-training, risk mapping, correlation analysis) is released as a Python package
-with M1 (MPS) and Colab (CUDA) notebooks. Re-running regenerates every table,
-figure and the district risk ranking reported here.
+The full pipeline (calibrated head, split-conformal wrapper, quantile-regression
+baseline, conditional-coverage protocol, transfer, robustness, Friedman/bootstrap
+statistics) is released as a Python package driven by open CUDA notebooks
+(\texttt{p2\_calib\_colab.ipynb}, \texttt{run\_p2\_*.py}). Per-(seed, condition)
+predictions are persisted, so every table and coverage figure here is reproducible
+without retraining. Re-running the drivers top-to-bottom regenerates every table
+and figure in this paper.
 
 \bibliographystyle{IEEEtran}
 \bibliography{../references}

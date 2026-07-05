@@ -1,0 +1,33 @@
+{
+  "tag": "p2cc",
+  "dataset": "chicago",
+  "seeds": [
+    42,
+    1,
+    2,
+    3,
+    4
+  ],
+  "conditions": {
+    "calibrated": {
+      "coverage80_mean": 0.840702947845805,
+      "conditional_gap_mean": 0.11546024326710562,
+      "low_mean": 0.9034694661374983,
+      "med_mean": 0.7256341275941584,
+      "high_mean": 0.8576929096885271,
+      "top_decile_mean": 0.9153386454183267,
+      "per_node_coverage_std_mean": 0.07187768828462307,
+      "sharpness80_mean": 11.668160247802735
+    },
+    "conformal": {
+      "coverage80_mean": 0.7864667078952793,
+      "conditional_gap_mean": 0.3363545816733068,
+      "low_mean": 0.8346434515426961,
+      "med_mean": 0.8448501152959264,
+      "high_mean": 0.6800125215213649,
+      "top_decile_mean": 0.46364541832669326,
+      "per_node_coverage_std_mean": 0.1871731236796727,
+      "sharpness80_mean": 7.330486411521852
+    }
+  }
+}

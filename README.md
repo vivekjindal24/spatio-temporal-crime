@@ -1,6 +1,6 @@
 # HASI-Net — Heterogeneous Adaptive Spatio-temporal Informer Network
 
-Forecasting **women-centric crimes** on **aggregated district data** for the
+1Forecasting **women-centric crimes** on **aggregated district data** for the
 **Madhya Pradesh** region, with a Chicago fine-grained benchmark.
 
 This repository is the reproducible companion to two research papers
