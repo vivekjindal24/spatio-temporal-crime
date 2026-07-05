@@ -152,7 +152,16 @@ def _rook_from_gdf(gdf, key_for, districts: List[str], cfg: Config) -> np.ndarra
             key_to_panel[k] = districts.index(d)
             present_keys.append(k)
     sub = gdf.reindex(present_keys)
-    joined = gpd.sjoin(sub, gdf, how="left", predicate="touches")
+    # Repair geometry validity before the spatial join: city-published boundary
+    # files (e.g. Austin council districts) often carry self-intersecting
+    # MultiPolygons, on which GEOS ``touches`` silently returns no matches,
+    # yielding an empty A_geo. ``buffer(0)`` is the standard make-valid repair
+    # and is a no-op on already-valid geometries (Chicago, India), so it is safe
+    # to apply for every region. Operate on copies so the caller's gdf is intact.
+    gdf_v = gdf.copy()
+    gdf_v.geometry = gdf_v.geometry.buffer(0)
+    sub_v = gdf_v.reindex(present_keys)
+    joined = gpd.sjoin(sub_v, gdf_v, how="left", predicate="touches")
     # sjoin stores the matched right-side key in a column named after the
     # right gdf's index (e.g. "__d_right" for India, "__n_right" for Chicago).
     right_col = next((c for c in joined.columns if c.endswith("_right")

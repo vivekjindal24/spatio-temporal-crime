@@ -75,12 +75,18 @@ def main() -> None:
     print("\nBuilding A_geo (rook contiguity from council-district GeoJSON) ...")
     A_geo = build_geographic_adjacency(panel.districts, cfg)
     A_socio = build_socioeconomic_adjacency(panel.node_feats, cfg)
-    edges = int((A_geo.sum(axis=1) - 1).clip(min=0).sum() / 2)  # off-diagonal undirected edges
-    deg = A_geo.sum(axis=1) - 1.0  # exclude self-loop
+    # Off-diagonal undirected edge count: count nonzero entries excluding the
+    # self-loop (both A_geo and A_socio include an identity self-loop and are
+    # row-normalized, so row sums are always 1 -- count nonzeros, not sums).
+    def _edges(A):
+        M = np.asarray(A) > 0
+        return int((M.sum() - N) / 2)
+    edges = _edges(A_geo)
+    deg = (np.asarray(A_geo) > 0).sum(axis=1) - 1  # exclude self-loop
     print(f"  A_geo shape [{N},{N}]  rook edges = {edges}  "
-          f"min degree {deg.min():.0f}  max degree {deg.max():.0f}")
-    print(f"  A_socio shape [{N},{N}]  socio edges/row ~ "
-          f"{int(A_socio.sum(axis=1).mean() - 1)}")
+          f"min degree {deg.min()}  max degree {deg.max()}")
+    print(f"  A_socio shape [{N},{N}]  socio edges = {_edges(A_socio)} "
+          f"(kNN on identical ones-features)")
     assert edges > 0, ("A_geo has NO rook edges -- boundary download/parse "
                        "likely failed and it fell back to the hash-kNN "
                        "fallback. Check geopandas + the w3v2-cj58 GeoJSON URL.")
