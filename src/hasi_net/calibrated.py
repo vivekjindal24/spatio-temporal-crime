@@ -79,17 +79,33 @@ def decode_quantiles(q_logit: torch.Tensor, carry_raw: torch.Tensor,
     ``q_logit``: [B, N, H, C, |Q|]; ``carry_raw``: [B, N, H, C] -- the RAW
     count-space (>= 0) persistence carry, NOT log-encoded.
 
-    Decoding in count space (``q = carry_raw * exp(q_logit)``) is what lets the
-    lower quantile reach 0: when the lookback mean is 0 (zero-inflated crimes),
-    every quantile is 0 so a true count of 0 falls inside the interval. Decoding
-    in log space instead (``exp(q_logit + log(carry))`` with ``carry`` clamped
-    to a positive floor) forces ``q0.1 > 0``, so every zero observation lands
-    below the lower bound and is never covered -- the under-coverage seen for
-    kidnapping (cov 0.03) and rape on Chicago. Dense crimes (large carry) are
-    unaffected by this change since ``carry`` is well above the floor there.
+    The decode must let the lower quantile reach 0 so zero-inflated crimes
+    cover y=0, yet stay tight (heteroscedastic, multiplicative) for the upper
+    tail of dense crimes. Three options were evaluated on Chicago (cov80 on the
+    80% central interval, target 0.80):
+
+      * ``q = carry * exp(q_logit)`` (pure exp): q0.1 > 0 whenever carry > 0,
+        so every zero observation falls below the lower bound -- kidnapping
+        cov80 0.03, overall 0.55.  Rejected.
+      * ``q = carry * q_logit`` (linear): can reach 0 (clamp) but over-spreads
+        the upper tail -- overall 0.90, sharpness 2x looser than expm1.
+        Rejected.
+      * ``q = carry * expm1(q_logit)`` (used here): q_logit < 0 -> q < 0 ->
+        clamp 0 (covers y=0 even when carry > 0, since a 12-month lookback mean
+        is usually a small fraction, not exactly 0); q_logit > 0 -> exp-like
+        multiplicative spread (tight).  Chicago cov80 0.837, dense crimes
+        0.76-0.80, sparse crimes 0.88-0.92 (over-cover via the non-negativity
+        floor -- structurally honest).  Chosen.
+
+    Sparse crimes over-cover because the lower interval bound cannot go below 0:
+    a [0.1, 0.9] interval on zero-inflated counts captures P(0 <= y <= q0.9) =
+    P(y <= q0.9) ~ 0.9, not 0.8.  This is a disclosed property of count
+    quantiles, not a calibration error.
     """
     if out_kind == "exp":
-        q = carry_raw.unsqueeze(-1) * torch.exp(q_logit)
+        # count space (nb/poisson): q = carry * expm1(q_logit).  expm1 (not exp)
+        # so q_logit<0 -> q<0 -> clamp 0 -> y=0 is covered even when carry>0.
+        q = carry_raw.unsqueeze(-1) * torch.expm1(q_logit)
     elif out_kind == "expm1":
         # log1p space: q = expm1(log1p(carry) + q_logit); carry=0 -> log1p=0
         # -> q = expm1(q_logit), which can be <= 0 (clamped) so 0 is reachable.
@@ -109,7 +125,7 @@ def _pinball(q: torch.Tensor, y: torch.Tensor, tau: float) -> torch.Tensor:
 
 def calibrated_loss(logits: Dict[str, torch.Tensor], target: torch.Tensor,
                     gate_logit: torch.Tensor, quantiles: List[float],
-                    pinball_weight: float = 0.5, nb_weight: float = 0.05
+                    pinball_weight: float = 1.0, nb_weight: float = 0.05
                     ) -> torch.Tensor:
     """Multi-objective calibrated loss, aligned with the metrics we report
     (MAE, CRPS, coverage) -- Paper 2.

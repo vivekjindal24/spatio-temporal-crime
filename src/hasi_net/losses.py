@@ -126,7 +126,7 @@ def count_loss(logits: dict, target: torch.Tensor, cfg) -> torch.Tensor:
         from .calibrated import calibrated_loss, QUANTILES
         levels = logits.get("quantile_levels", QUANTILES)
         return calibrated_loss(logits, target, logits["gate_logit"], levels,
-                               pinball_weight=getattr(cfg, "pinball_weight", 0.5))
+                               pinball_weight=getattr(cfg, "pinball_weight", 1.0))
     lt = cfg.loss_type.lower()
     if lt == "poisson":
         return PoissonLoss()(logits["log_mu"], target)

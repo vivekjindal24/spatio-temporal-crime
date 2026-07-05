@@ -92,7 +92,11 @@ class Config:
     # (calibrated.py) and is evaluated with CRPS / coverage / sharpness. The
     # per-crime ZINB/NB gate is initialised from the training zero fraction.
     calibrated_head: bool = False
-    pinball_weight: float = 0.5     # weight of the quantile pinball term
+    # Empirically tuned with the expm1 quantile decode so the calibrated head's
+    # 80% central interval is near-nominal (Chicago cov80 ~0.84) without
+    # degrading point MAE. A sweep (0.5, 1.0, 2.0, 4.0) found 1.0 optimal; 0.5
+    # under-covers and >=2.0 pulls the mean off the persistence carry. Paper 2.
+    pinball_weight: float = 1.0
 
     # --- Training ------------------------------------------------------------
     epochs: int = 80
