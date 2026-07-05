@@ -71,19 +71,32 @@ class CalibratedHead(nn.Module):
                 "pi_logit": pi_logit, "q_logit": q_logit}
 
 
-def decode_quantiles(q_logit: torch.Tensor, carry_enc: torch.Tensor,
+def decode_quantiles(q_logit: torch.Tensor, carry_raw: torch.Tensor,
                      out_kind: str) -> torch.Tensor:
-    """Add the persistence carry (in log space) to raw quantile logits, decode
-    to non-negative counts, and enforce monotone ordering per element.
+    """Decode raw quantile logits to non-negative count-space quantiles, scaled
+    by the persistence carry, with monotone ordering per element.
 
-    ``q_logit``: [B, N, H, C, |Q|]; ``carry_enc``: [B, N, H, C] (encoded carry,
-    same space as ``log_mu``). Returns sorted count-space quantiles.
+    ``q_logit``: [B, N, H, C, |Q|]; ``carry_raw``: [B, N, H, C] -- the RAW
+    count-space (>= 0) persistence carry, NOT log-encoded.
+
+    Decoding in count space (``q = carry_raw * exp(q_logit)``) is what lets the
+    lower quantile reach 0: when the lookback mean is 0 (zero-inflated crimes),
+    every quantile is 0 so a true count of 0 falls inside the interval. Decoding
+    in log space instead (``exp(q_logit + log(carry))`` with ``carry`` clamped
+    to a positive floor) forces ``q0.1 > 0``, so every zero observation lands
+    below the lower bound and is never covered -- the under-coverage seen for
+    kidnapping (cov 0.03) and rape on Chicago. Dense crimes (large carry) are
+    unaffected by this change since ``carry`` is well above the floor there.
     """
-    q = q_logit + carry_enc.unsqueeze(-1)
     if out_kind == "exp":
-        q = torch.exp(q)
+        q = carry_raw.unsqueeze(-1) * torch.exp(q_logit)
     elif out_kind == "expm1":
-        q = torch.expm1(q)
+        # log1p space: q = expm1(log1p(carry) + q_logit); carry=0 -> log1p=0
+        # -> q = expm1(q_logit), which can be <= 0 (clamped) so 0 is reachable.
+        q = torch.expm1(torch.log1p(carry_raw.clamp(min=0.0)).unsqueeze(-1)
+                        + q_logit)
+    else:
+        q = carry_raw.unsqueeze(-1) + q_logit
     q = q.clamp(min=0.0)
     return torch.sort(q, dim=-1)[0]
 

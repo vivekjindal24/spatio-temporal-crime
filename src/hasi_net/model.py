@@ -318,6 +318,10 @@ class HASINet(nn.Module):
         else:
             carry_enc = carry
         carry_enc = carry_enc.unsqueeze(2).expand(-1, -1, H, -1)  # [B,N,H,C]
+        # Raw count-space carry (>= 0, can be 0) for the quantile decode: lets
+        # the lower quantile reach 0 so zero-inflated crimes cover y=0. The
+        # log_mu / NB path still uses the log-encoded carry_enc above.
+        carry_raw = carry.clamp(min=0.0).unsqueeze(2).expand(-1, -1, H, -1)
 
         if self.calibrated:
             from .calibrated import decode_quantiles, QUANTILES
@@ -325,7 +329,7 @@ class HASINet(nn.Module):
             log_mu = (carry_enc + hd["log_mu"]).permute(0, 2, 1, 3)
             alpha = hd["log_alpha"].permute(0, 2, 1, 3)
             pi = hd["pi_logit"].permute(0, 2, 1, 3)
-            q = decode_quantiles(hd["q_logit"], carry_enc, self.out_kind)
+            q = decode_quantiles(hd["q_logit"], carry_raw, self.out_kind)
             q = q.permute(0, 2, 1, 3, 4)                   # [B,H,N,C,|Q|]
             return {"log_mu": log_mu, "log_alpha": alpha, "pi_logit": pi,
                     "quantiles": q, "gate_logit": self.gate_logit,
