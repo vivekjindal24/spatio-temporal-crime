@@ -355,5 +355,5 @@ def run_hotspot(dataset: str, cfg: Config, seeds: List[int],
     if verbose:
         print("\n=== hotspot mean +/- std ===")
         with pd.option_context("display.float_format", lambda v: f"{v:.4f}"):
-            print(meanstd_df[cols].round(4))
+            print(meanstd_df.round(4))
     return meanstd_df
