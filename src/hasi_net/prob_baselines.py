@@ -45,8 +45,8 @@ from .config import Config, RESULTS_DIR
 from .data import get_dataset
 from .train import (build_model, make_splits, WindowDataset, train_one,
                     select_device, set_seed, Metrics, _csi)
-from .transfer import (_assemble, _loaders, evaluate_calibrated,
-                       METRIC_COLS, CAL_COLS, _json_default)
+from .transfer import (_assemble, _loaders, _train_zero_fraction,
+                       evaluate_calibrated, METRIC_COLS, CAL_COLS, _json_default)
 from .calibrated import calibration_metrics, quantile_regression_loss, QUANTILES
 
 # 80% central interval target (alpha = 0.2) and the standard-normal quantile
