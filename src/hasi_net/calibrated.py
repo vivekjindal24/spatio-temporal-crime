@@ -173,6 +173,30 @@ def calibrated_loss(logits: Dict[str, torch.Tensor], target: torch.Tensor,
     return point + pinball_weight * pin + nb_weight * nb_reg
 
 
+def quantile_regression_loss(logits: Dict[str, torch.Tensor], target: torch.Tensor,
+                             quantiles: List[float] = QUANTILES
+                             ) -> torch.Tensor:
+    """Pure pinball loss on the quantile forecast (log1p space) -- the
+    quantile-regression BASELINE for Paper 2.
+
+    Identical persistence-carry monotone quantile head + decode as the
+    calibrated head (same backbone, same ``CalibratedHead``), but trained with
+    ONLY the pinball term: no log1p-MSE point objective, no gated ZINB/NB
+    regulariser, no sparsity-initialised gate. This isolates the contribution of
+    the calibrated multi-objective loss + sparsity gate vs plain quantile
+    regression, with architecture held fixed.
+
+    ``logits`` is the model forward output; ``logits["quantiles"]`` is the
+    count-space monotone forecast [B, H, N, C, |Q|]. ``target`` is [B, H, N, C].
+    """
+    log_y = torch.log1p(target)
+    q = logits["quantiles"].clamp(min=0.0)                         # [B,H,N,C,|Q|]
+    tau_t = torch.tensor(quantiles, dtype=q.dtype, device=q.device)
+    diff = log_y.unsqueeze(-1) - torch.log1p(q)                   # [B,H,N,C,|Q|]
+    pin = torch.maximum(tau_t * diff, (tau_t - 1.0) * diff)
+    return pin.mean()
+
+
 @dataclass
 class Calibration:
     crps: float          # quantile-integral CRPS (lower is better)
