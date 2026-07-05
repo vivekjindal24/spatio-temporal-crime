@@ -341,3 +341,164 @@ def run_prob_baselines(dataset: str, cfg: Config, seeds: List[int],
             print(agg.round(4))
             print(f"(calvspt {calvspt.name} not found -- 4-way merge skipped)")
     return df
+
+
+# --------------------------------------------------------------------------- #
+# Conditional calibration (Paper 2 -- the answer to "conformal is sharper")  #
+# --------------------------------------------------------------------------- #
+def _bucket_coverage(covered: np.ndarray, y: np.ndarray,
+                    target: float = 0.8) -> Dict:
+    """Coverage within true-count buckets + the conditional-coverage gap.
+
+    Buckets are global terciles of the true count (low / med / high) plus the
+    top-decile ("spike") bucket -- the high-count events that matter most for
+    policing. ``conditional_gap`` = max |bucket_coverage - target| over the
+    non-empty buckets; smaller = more uniform (conditional) calibration.
+
+    ``covered`` and ``y`` are flat boolean / float arrays of equal length.
+    """
+    y = np.asarray(y, dtype=np.float64)
+    cov = np.asarray(covered, dtype=bool)
+    q33, q66 = np.quantile(y, [1.0 / 3.0, 2.0 / 3.0])
+    top = np.quantile(y, 0.9)
+    masks = {"low": y <= q33, "med": (y > q33) & (y <= q66),
+             "high": y > q66, "top_decile": y >= top}
+    out, vals = {}, []
+    for k, m in masks.items():
+        c = float(cov[m].mean()) if int(m.sum()) else float("nan")
+        out[k] = c
+        if not np.isnan(c):
+            vals.append(abs(c - target))
+    out["conditional_gap"] = float(np.max(vals)) if vals else float("nan")
+    return out
+
+
+def run_conditional_calibration(dataset: str, cfg: Config, seeds: List[int],
+                                tag: str = "p2cc", force: bool = False,
+                                verbose: bool = True) -> pd.DataFrame:
+    """Conditional (per-count-bucket, per-crime, per-node) coverage of the
+    calibrated head vs split conformal, on FRESHLY-TRAINED per-seed models
+    (persisted to .pt for reproducibility).
+
+    Tests the standard critique that conformal's marginal coverage guarantee is
+    *only* marginal: homoscedastic per-crime intervals over-cover low-crime
+    cells and under-cover the high-crime spikes. The calibrated head's
+    heteroscedastic intervals (wider for high-exposure nodes) should give more
+    UNIFORM coverage across crime-load buckets and across nodes -- the
+    conditional-validity axis where the calibrated head can genuinely beat
+    conformal even though conformal is sharper on the aggregate.
+
+    Both conditions are trained in THIS run with the same seeds, so the
+    calibrated-vs-conformal conditional comparison is internally consistent
+    (any CUDA retrain nondeterminism simply adds to the reported seed variance).
+    """
+    device = select_device(cfg.device)
+    cfg_pt = cfg.override(calibrated_head=False, loss_type="log1p_mse")
+    panel = _assemble(get_dataset(dataset, cfg), cfg)
+    C = panel["counts"].shape[2]
+    cats = panel["categories"]
+    zf = _train_zero_fraction(panel, cfg)
+    rows = []
+    for seed in seeds:
+        for cond, c in (("calibrated", cfg), ("conformal", cfg_pt)):
+            path = RESULTS_DIR / f"condcal_{dataset}_{tag}_seed{seed}_{cond}.json"
+            if path.exists() and not force:
+                rows.append(json.loads(path.read_text()))
+                if verbose:
+                    print(f"[{dataset} {seed}/{cond}] cached")
+                continue
+            set_seed(seed)
+            tr, va, te = _loaders(panel, c)
+            model = build_model(c, panel, device)
+            if c.calibrated_head:
+                model.set_gate_from_sparsity(zf)
+            train_one(model, c, tr, va, device, verbose=False)
+            # Persist: conditional coverage is sensitive to the exact trained
+            # model, and CUDA retrains are not bit-identical, so save the state
+            # dict so the per-crime / per-node breakdown is reproducible.
+            torch.save(model.state_dict(),
+                       RESULTS_DIR / f"condcal_{dataset}_{tag}_seed{seed}_{cond}.pt")
+
+            model.eval()
+            tpred, ttrue, tqs = [], [], []
+            with torch.no_grad():
+                for x, y in te:
+                    x = x.to(device)
+                    if cond == "calibrated":
+                        q = model.predict_quantiles(x, c.horizon).cpu().numpy()
+                        tqs.append(q)
+                        mu = np.clip(q[..., QUANTILES.index(0.5)], 0, None)
+                    else:
+                        mu = model.predict_mean(x, c.horizon).cpu().numpy()
+                    tpred.append(mu)
+                    ttrue.append(y.numpy())
+            pred = np.clip(np.concatenate(tpred, 0), 0, None)   # [n,H,N,C]
+            true = np.concatenate(ttrue, 0)
+            if cond == "calibrated":
+                Q = np.concatenate(tqs, 0)                      # [n,H,N,C,|Q|]
+                lo = Q[..., QUANTILES.index(0.1)]
+                hi = Q[..., QUANTILES.index(0.9)]
+            else:
+                vpred, vtrue = [], []
+                with torch.no_grad():
+                    for x, y in va:
+                        vpred.append(model.predict_mean(x.to(device),
+                                      c.horizon).cpu().numpy())
+                        vtrue.append(y.numpy())
+                vp = np.clip(np.concatenate(vpred, 0), 0, None)
+                vt = np.concatenate(vtrue, 0)
+                qhat = _conformal_halfwidths(vp, vt, C)         # [C]
+                lo = np.clip(pred - qhat.reshape(1, 1, 1, C), 0, None)
+                hi = pred + qhat.reshape(1, 1, 1, C)
+            covered = (true >= lo) & (true <= hi)
+            yf = true.reshape(-1)
+            cf = covered.reshape(-1)
+            marginal = float(cf.mean())
+            bks = _bucket_coverage(cf, yf)
+            per_crime = [float(((true[..., j] >= lo[..., j]) &
+                                (true[..., j] <= hi[..., j])).mean())
+                         for j in range(C)]
+            n_nodes = true.shape[2]
+            per_node = [float(((true[:, :, n, :] >= lo[:, :, n, :]) &
+                               (true[:, :, n, :] <= hi[:, :, n, :])).mean())
+                        for n in range(n_nodes)]
+            row = {"dataset": dataset, "seed": seed, "condition": cond,
+                   "coverage80": marginal, "buckets": bks,
+                   "per_crime_coverage80": dict(zip(cats, per_crime)),
+                   "per_node_coverage_std": float(np.std(per_node)),
+                   "sharpness80": float((hi - lo).mean())}
+            path.write_text(json.dumps(row, indent=2, default=_json_default))
+            rows.append(row)
+            if verbose:
+                print(f"[{dataset} {seed}/{cond}] marginal={marginal:.4f} "
+                      f"gap={bks['conditional_gap']:.4f} "
+                      f"low/med/high={bks['low']:.3f}/{bks['med']:.3f}/"
+                      f"{bks['high']:.3f} top={bks['top_decile']:.3f} "
+                      f"pernode_std={np.std(per_node):.4f}", flush=True)
+
+    df = pd.DataFrame(rows)
+    df.to_csv(RESULTS_DIR / f"condcal_{dataset}_{tag}_perseed.csv", index=False)
+    summary = {}
+    for cond, g in df.groupby("condition"):
+        bk = pd.DataFrame([r["buckets"] for r in g.to_dict("records")])
+        summary[cond] = {
+            "coverage80_mean": float(g["coverage80"].mean()),
+            "conditional_gap_mean": float(bk["conditional_gap"].mean()),
+            "low_mean": float(bk["low"].mean()), "med_mean": float(bk["med"].mean()),
+            "high_mean": float(bk["high"].mean()),
+            "top_decile_mean": float(bk["top_decile"].mean()),
+            "per_node_coverage_std_mean": float(g["per_node_coverage_std"].mean()),
+            "sharpness80_mean": float(g["sharpness80"].mean()),
+        }
+    (RESULTS_DIR / f"summary_{tag}_{dataset}_condcal.json").write_text(
+        json.dumps({"tag": tag, "dataset": dataset, "seeds": seeds,
+                    "conditions": summary}, indent=2, default=_json_default))
+    if verbose:
+        print(f"\n=== conditional calibration ({dataset}, mean over seeds) ===")
+        for cond, s in summary.items():
+            print(f"  {cond:10s} marginal={s['coverage80_mean']:.4f} "
+                  f"cond_gap={s['conditional_gap_mean']:.4f} "
+                  f"low/med/high={s['low_mean']:.3f}/{s['med_mean']:.3f}/"
+                  f"{s['high_mean']:.3f} top={s['top_decile_mean']:.3f} "
+                  f"pernode_std={s['per_node_coverage_std_mean']:.4f}")
+    return df
